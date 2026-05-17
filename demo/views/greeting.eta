@@ -1,0 +1,9 @@
+<div class="greeting">
+  <h1><%= it.heading %></h1>
+  <div class="stars">
+    <% for (let i = 0; i < it.count; i++) { %>
+      <span class="star">&#9733;</span>
+    <% } %>
+  </div>
+  <p>Showing <%= it.count %> star<%= it.count !== 1 ? "s" : "" %>.</p>
+</div>

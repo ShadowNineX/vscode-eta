@@ -1,0 +1,41 @@
+<article class="blog-post blog-post--<%= it.status %>">
+  <header class="blog-post__header">
+    <h1 class="blog-post__title"><%= it.title %></h1>
+    <p class="blog-post__meta">
+      By <strong><%= it.author.name %></strong>
+      (<span class="role"><%= it.author.role %></span>)
+      &mdash; <time><%= it.publishedAt %></time>
+    </p>
+
+    <% if (it.featuredImage) { %>
+      <img class="blog-post__hero" src="<%= it.featuredImage %>" alt="<%= it.title %>">
+    <% } %>
+
+    <ul class="blog-post__tags">
+      <% it.tags.forEach(function(tag) { %>
+        <li class="tag">#<%= tag.toLowerCase() %></li>
+      <% }) %>
+    </ul>
+
+    <span class="badge badge--<%= it.status %>">
+      <%= it.status.toUpperCase() %>
+    </span>
+    <span class="views"><%= it.viewCount %> views</span>
+  </header>
+
+  <div class="blog-post__body">
+    <%= it.body %>
+  </div>
+
+  <section class="blog-post__comments">
+    <h2><%= it.comments.length %> Comment<%= it.comments.length !== 1 ? "s" : "" %></h2>
+    <% it.comments.forEach(function(c) { %>
+      <div class="comment" id="comment-<%= c.id %>">
+        <p class="comment__author"><strong><%= c.author %></strong>
+          &mdash; <time><%= c.createdAt %></time></p>
+        <p class="comment__body"><%= c.body %></p>
+        <small class="comment__likes"><%= c.likes %> like<%= c.likes !== 1 ? "s" : "" %></small>
+      </div>
+    <% }) %>
+  </section>
+</article>

@@ -1,0 +1,157 @@
+{
+  "Output (escaped)": {
+    "prefix": "=",
+    "body": "<%= ${1:it.variable} %>",
+    "description": "Output escaped value"
+  },
+  "Output (raw HTML)": {
+    "prefix": "~",
+    "body": "<%~ ${1:it.variable} %>",
+    "description": "Output raw HTML (unescaped)"
+  },
+  "Execute JavaScript": {
+    "prefix": "code",
+    "body": "<% ${1:let x = 1} %>",
+    "description": "Execute JavaScript code"
+  },
+  "If statement": {
+    "prefix": "if",
+    "body": "<% if (${1:condition}) { %>\n\t${2:content}\n<% } %>",
+    "description": "Conditional block"
+  },
+  "If-else statement": {
+    "prefix": "ifelse",
+    "body": "<% if (${1:condition}) { %>\n\t${2:true content}\n<% } else { %>\n\t${3:false content}\n<% } %>",
+    "description": "Conditional block with else"
+  },
+  "For loop": {
+    "prefix": "for",
+    "body": "<% ${1:it.items}.forEach(function(${2:item}) { %>\n\t${3:<li><%= item %></li>}\n<% }) %>",
+    "description": "Loop over array items"
+  },
+  "For-of loop": {
+    "prefix": "forof",
+    "body": "<% for (const ${1:item} of ${2:it.items}) { %>\n\t${3:content}\n<% } %>",
+    "description": "For-of loop"
+  },
+  "For-in loop": {
+    "prefix": "forin",
+    "body": "<% for (const ${1:key} in ${2:it.object}) { %>\n\t${3:content}\n<% } %>",
+    "description": "For-in loop"
+  },
+  "For-i++ loop": {
+    "prefix": "fori",
+    "body": "<% for (let ${1:i} = 0; ${1:i} < ${2:it.items}.length; ${1:i}++) { %>\n\t${3:content}\n<% } %>",
+    "description": "Classic for loop with index"
+  },
+  "Layout": {
+    "prefix": "layout",
+    "body": "<% layout(\"${1:./layout}\") %>",
+    "description": "Set parent layout"
+  },
+  "Layout with data": {
+    "prefix": "layoutdata",
+    "body": "<% layout(\"${1:./layout}\", { ${2:title: \"Page Title\"}} ) %>",
+    "description": "Set parent layout with data"
+  },
+  "Include partial": {
+    "prefix": "include",
+    "body": "<%~ include(\"${1:./partial}\") %>",
+    "description": "Include a partial template"
+  },
+  "Include with data": {
+    "prefix": "includedata",
+    "body": "<%~ include(\"${1:./partial}\", { ${2:option: true}} ) %>",
+    "description": "Include a partial with data"
+  },
+  "Include async": {
+    "prefix": "includeasync",
+    "body": "<%~ await includeAsync(\"${1:./partial}\") %>",
+    "description": "Include async partial"
+  },
+  "Block definition": {
+    "prefix": "block",
+    "body": "<% block(\"${1:blockname}\", () => { %>\n\t${2:default content}\n<% }) %>",
+    "description": "Define a named block"
+  },
+  "Block async": {
+    "prefix": "blockasync",
+    "body": "<% blockAsync(\"${1:blockname}\", async () => { %>\n\t${2:<%= await someData() %>}\n<% }) %>",
+    "description": "Define an async block"
+  },
+  "Render block": {
+    "prefix": "renderblock",
+    "body": "<%~ block(\"${1:blockname}\") %>",
+    "description": "Render a block in layout"
+  },
+  "Render block with fallback": {
+    "prefix": "blockfallback",
+    "body": "<%~ block(\"${1:blockname}\", () => { %>\n\t${2:fallback content}\n<% }) %>",
+    "description": "Render block with fallback content"
+  },
+  "Capture": {
+    "prefix": "capture",
+    "body": "<% const ${1:variable} = capture(() => { %>\n\t${2:content}\n<% }) %>",
+    "description": "Capture template output"
+  },
+  "Capture async": {
+    "prefix": "captureasync",
+    "body": "<% const ${1:variable} = await captureAsync(async () => { %>\n\t${2:content}\n<% }) %>",
+    "description": "Capture async template output"
+  },
+  "Output helper": {
+    "prefix": "output",
+    "body": "<% output(\"${1:html content}\") %>",
+    "description": "Append string to output"
+  },
+  "Console log": {
+    "prefix": "log",
+    "body": "<% console.log(${1:\"Debug: \", it.value}) %>",
+    "description": "Log to console"
+  },
+  "Comment": {
+    "prefix": "comment",
+    "body": "<% /* ${1:comment}} */ %>",
+    "description": "Add a comment"
+  },
+  "HTML template": {
+    "prefix": "html",
+    "body": "<!DOCTYPE html>\n<html>\n<head>\n\t<meta charset=\"UTF-8\">\n\t<title><%= it.title %></title>\n</head>\n<body>\n\t${1:<!-- content -->}\n</body>\n</html>",
+    "description": "Basic HTML template"
+  },
+  "Data access": {
+    "prefix": "it",
+    "body": "it.${1:property}",
+    "description": "Access template data via 'it' object"
+  },
+  "Whitespace trim before (all)": {
+    "prefix": "wstrim",
+    "body": "<%_ ${1:code} %>",
+    "description": "Execute + trim ALL whitespace before tag"
+  },
+  "Newline trim before (one)": {
+    "prefix": "nltrim",
+    "body": "<%- ${1:code} %>",
+    "description": "Execute + trim 1 newline before tag"
+  },
+  "Whitespace trim after (all)": {
+    "prefix": "wstrimend",
+    "body": "<% ${1:code} _%>",
+    "description": "Execute + trim ALL whitespace after tag"
+  },
+  "Newline trim after (one)": {
+    "prefix": "nltrimend",
+    "body": "<% ${1:code} -%>",
+    "description": "Execute + trim 1 newline after tag"
+  },
+  "Output trim before": {
+    "prefix": "=-",
+    "body": "<%-= ${1:it.value} %>",
+    "description": "Output escaped + trim newline before tag"
+  },
+  "Render async block in layout": {
+    "prefix": "renderblockasync",
+    "body": "<%~ await blockAsync(\"${1:blockname}\") %>",
+    "description": "Render an async named block in layout"
+  }
+}

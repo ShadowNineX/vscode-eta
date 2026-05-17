@@ -1,0 +1,9 @@
+node_modules
+*.vsix
+.env
+out/
+dist/
+*.js
+!snippets/
+coverage/
+.vitest/

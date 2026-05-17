@@ -1,0 +1,23 @@
+<div class="order">
+  <header>
+    <h2>Order #<%= it.id %></h2>
+    <p>Customer: <strong><%= it.customer.name %></strong></p>
+  </header>
+
+  <table>
+    <thead>
+      <tr><th>Item</th><th>Price</th></tr>
+    </thead>
+    <tbody>
+      <% it.items.forEach(function(item) { %>
+        <tr>
+          <td><%= item.title %></td>
+          <td>$<%= item.price.toFixed(2) %></td>
+        </tr>
+      <% }) %>
+    </tbody>
+    <tfoot>
+      <tr><td>Total</td><td>$<%= it.total.toFixed(2) %></td></tr>
+    </tfoot>
+  </table>
+</div>

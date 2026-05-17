@@ -1,0 +1,15 @@
+<div class="product">
+  <h2><%= it.title.toUpperCase() %></h2>
+
+  <p class="price">$<%= it.price.toFixed(2) %></p>
+
+  <p class="stock <%= it.inStock ? 'in-stock' : 'out-of-stock' %>">
+    <%= it.inStock ? "In Stock" : "Out of Stock" %>
+  </p>
+
+  <ul class="tags">
+    <% it.tags.forEach(function(tag) { %>
+      <li class="tag"><%= tag %></li>
+    <% }) %>
+  </ul>
+</div>

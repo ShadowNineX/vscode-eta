@@ -1,0 +1,343 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Eta",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#tags"
+    },
+    {
+      "include": "#html"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.eta",
+          "begin": "<%\\s*/\\*",
+          "end": "\\*/\\s*%>",
+          "captures": {
+            "0": {
+              "name": "punctuation.definition.comment.eta"
+            }
+          }
+        },
+        {
+          "name": "comment.line.eta",
+          "begin": "<%\\s*//",
+          "end": "%>",
+          "captures": {
+            "0": {
+              "name": "punctuation.definition.comment.eta"
+            }
+          }
+        }
+      ]
+    },
+    "tags": {
+      "patterns": [
+        {
+          "name": "meta.tag.eta",
+          "begin": "<%([~=]|[-_][~=]?)?",
+          "end": "[-_]?%>",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.operator.eta"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "keyword.operator.eta"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#tag-content"
+            }
+          ]
+        },
+        {
+          "name": "meta.tag.custom.eta",
+          "begin": "<%([#*])",
+          "end": "[-_]?%>",
+          "beginCaptures": {
+            "1": {
+              "name": "keyword.operator.custom.eta"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "keyword.operator.eta"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#tag-content"
+            }
+          ]
+        }
+      ]
+    },
+    "tag-content": {
+      "patterns": [
+        {
+          "include": "#keywords"
+        },
+        {
+          "include": "#functions"
+        },
+        {
+          "include": "#strings"
+        },
+        {
+          "include": "#operators"
+        },
+        {
+          "include": "#numbers"
+        },
+        {
+          "include": "#variables"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.eta",
+          "match": "\\b(if|else|else\\s+if|for|while|do|switch|case|default|break|continue|return|function|const|let|var|async|await|try|catch|finally|throw|new|typeof|instanceof|in|of|class|extends|super|this|static|import|export|from)\\b"
+        },
+        {
+          "name": "keyword.operator.eta",
+          "match": "\\b(true|false|null|undefined|NaN|Infinity)\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "support.function.eta",
+          "match": "\\b(layout|include|includeAsync|block|blockAsync|output|capture|captureAsync|console\\.log)\\b"
+        },
+        {
+          "name": "support.function.builtin",
+          "match": "\\b(Object|Array|String|Number|Math|Date|JSON|setTimeout|setInterval|clearTimeout|clearInterval|parseInt|parseFloat|isNaN|isFinite)\\b"
+        },
+        {
+          "name": "meta.function-call.eta",
+          "match": "\\b([a-zA-Z_$][a-zA-Z0-9_$]*)\\s*(?=\\()"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.eta",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.eta",
+              "match": "\\\\."
+            },
+            {
+              "name": "variable.interpolation.eta",
+              "match": "\\$\\{[^}]*\\}"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.eta",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "constant.character.escape.eta",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.template.eta",
+          "begin": "`",
+          "end": "`",
+          "patterns": [
+            {
+              "name": "constant.character.escape.eta",
+              "match": "\\\\."
+            },
+            {
+              "name": "variable.interpolation.eta",
+              "match": "\\$\\{[^}]*\\}"
+            }
+          ]
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.eta",
+          "match": "(===|!==|==|!=|<=|>=|<|>)"
+        },
+        {
+          "name": "keyword.operator.logical.eta",
+          "match": "(\\&\\&|\\|\\||!)"
+        },
+        {
+          "name": "keyword.operator.arithmetic.eta",
+          "match": "(\\+|-|\\*|/|%|\\*\\*)"
+        },
+        {
+          "name": "keyword.operator.assignment.eta",
+          "match": "(=|\\+=|-=|\\*=|/=|%=|\\*\\*=|\\&\\&=|\\|\\|=)"
+        },
+        {
+          "name": "keyword.operator.spread.eta",
+          "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.ternary.eta",
+          "match": "\\?|:"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.eta",
+          "match": "\\b\\d+\\.\\d*([eE][+-]?\\d+)?\\b"
+        },
+        {
+          "name": "constant.numeric.integer.eta",
+          "match": "\\b(0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|\\d+)\\b"
+        }
+      ]
+    },
+    "variables": {
+      "patterns": [
+        {
+          "name": "variable.other.property.eta",
+          "match": "\\b(it)\\b(?=\\.)"
+        },
+        {
+          "name": "variable.other.eta",
+          "match": "\\b[a-zA-Z_$][a-zA-Z0-9_$]*\\b"
+        }
+      ]
+    },
+    "html": {
+      "patterns": [
+        {
+          "name": "meta.tag.html",
+          "begin": "<(?!/|\\?|!)",
+          "end": "(?:/>|>)",
+          "patterns": [
+            {
+              "name": "entity.name.tag.html",
+              "match": "[a-zA-Z_:][a-zA-Z0-9_:.-]*"
+            },
+            {
+              "include": "#html-attributes"
+            }
+          ]
+        },
+        {
+          "name": "meta.tag.html.close",
+          "begin": "</",
+          "end": ">",
+          "patterns": [
+            {
+              "name": "entity.name.tag.html",
+              "match": "[a-zA-Z_:][a-zA-Z0-9_:.-]*"
+            }
+          ]
+        },
+        {
+          "name": "meta.doctype.html",
+          "begin": "<!DOCTYPE",
+          "end": ">",
+          "patterns": [
+            {
+              "name": "keyword.other.doctype.html",
+              "match": "\\b(html|HTML)\\b"
+            }
+          ]
+        },
+        {
+          "name": "comment.block.html",
+          "begin": "<!--",
+          "end": "-->"
+        }
+      ]
+    },
+    "html-attributes": {
+      "patterns": [
+        {
+          "name": "entity.other.attribute-name.html",
+          "match": "[a-zA-Z_:][a-zA-Z0-9_:.-]*(?=\\s*=)"
+        },
+        {
+          "name": "punctuation.separator.key-value.html",
+          "match": "="
+        },
+        {
+          "include": "#html-attribute-value"
+        }
+      ]
+    },
+    "html-attribute-value": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.eta",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "meta.tag.eta",
+              "begin": "<%([~=]|[-_][~=]?)?",
+              "end": "[-_]?%>",
+              "beginCaptures": {
+                "0": { "name": "keyword.operator.eta" }
+              },
+              "endCaptures": {
+                "0": { "name": "keyword.operator.eta" }
+              },
+              "patterns": [{ "include": "#tag-content" }]
+            },
+            {
+              "name": "constant.character.escape.eta",
+              "match": "\\\\."
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.single.eta",
+          "begin": "'",
+          "end": "'",
+          "patterns": [
+            {
+              "name": "meta.tag.eta",
+              "begin": "<%([~=]|[-_][~=]?)?",
+              "end": "[-_]?%>",
+              "beginCaptures": {
+                "0": { "name": "keyword.operator.eta" }
+              },
+              "endCaptures": {
+                "0": { "name": "keyword.operator.eta" }
+              },
+              "patterns": [{ "include": "#tag-content" }]
+            },
+            {
+              "name": "constant.character.escape.eta",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "scopeName": "source.eta"
+}

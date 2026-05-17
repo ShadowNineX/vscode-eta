@@ -1,0 +1,36 @@
+<div class="cart">
+  <h2>Your Cart (<%= it.items.length %> item<%= it.items.length !== 1 ? "s" : "" %>)</h2>
+
+  <ul class="cart__items">
+    <% it.items.forEach(function(item) { %>
+      <li class="cart__item">
+        <span class="cart__item-name"><%= item.product.title %></span>
+        <span class="cart__item-tags">
+          <% item.product.tags.forEach(function(tag) { %>
+            <span class="tag tag--sm"><%= tag %></span>
+          <% }) %>
+        </span>
+        <span class="cart__item-qty">x<%= item.quantity %></span>
+        <span class="cart__item-price">
+          $<%= item.product.price.toFixed(2) %> each
+        </span>
+        <span class="cart__item-total">$<%= item.lineTotal.toFixed(2) %></span>
+      </li>
+    <% }) %>
+  </ul>
+
+  <% if (it.discountCode) { %>
+    <p class="cart__discount">
+      Promo code: <code><%= it.discountCode.toUpperCase() %></code>
+    </p>
+  <% } %>
+
+  <div class="cart__summary">
+    <dl>
+      <dt>Subtotal</dt><dd>$<%= it.subtotal.toFixed(2) %></dd>
+      <dt>Tax</dt>    <dd>$<%= it.tax.toFixed(2) %></dd>
+      <dt class="cart__total-label">Total</dt>
+      <dd class="cart__total-value"><strong>$<%= it.total.toFixed(2) %></strong></dd>
+    </dl>
+  </div>
+</div>

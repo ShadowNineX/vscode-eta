@@ -1,0 +1,65 @@
+{
+  "name": "eta",
+  "displayName": "Eta",
+  "description": "Advanced syntax highlighting, intellisense, autocomplete, and diagnostics for Eta templating language",
+  "version": "0.1.0",
+  "publisher": "eta-lang",
+  "engines": {
+    "vscode": "^1.120.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "@types/vscode": "^1.120.0",
+    "@vitest/ui": "^4.1.6",
+    "eta": "^4.6.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.6"
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "vitest run",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest --coverage",
+    "pretest": "npm run compile"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "eta",
+        "aliases": [
+          "Eta",
+          "eta"
+        ],
+        "extensions": [
+          ".eta"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "eta",
+        "scopeName": "source.eta",
+        "path": "./syntaxes/eta.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "eta",
+        "path": "./snippets/eta.json"
+      }
+    ]
+  },
+  "dependencies": {
+    "typescript": "^6.0.3",
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.12"
+  }
+}

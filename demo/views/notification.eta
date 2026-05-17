@@ -1,0 +1,19 @@
+<div class="notification notification--<%= it.type %><%= it.dismissible ? " notification--dismissible" : "" %>"
+     role="<%= it.type === "error" ? "alert" : "status" %>">
+  <div class="notification__icon notification__icon--<%= it.type %>"></div>
+
+  <div class="notification__content">
+    <strong class="notification__title"><%= it.title %></strong>
+    <p class="notification__message"><%= it.message %></p>
+
+    <% if (it.actionLabel && it.actionUrl) { %>
+      <a class="notification__action" href="<%= it.actionUrl %>">
+        <%= it.actionLabel %>
+      </a>
+    <% } %>
+  </div>
+
+  <% if (it.dismissible) { %>
+    <button class="notification__close" aria-label="Dismiss">&times;</button>
+  <% } %>
+</div>

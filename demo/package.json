@@ -1,0 +1,18 @@
+{
+  "name": "eta-demo",
+  "version": "1.0.0",
+  "description": "Demo workspace for the Eta VS Code extension — open this folder to try IntelliSense",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "ts-node src/index.ts",
+    "build": "tsc -p ."
+  },
+  "dependencies": {
+    "eta": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.8.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^6.0.3"
+  }
+}

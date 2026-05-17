@@ -1,0 +1,5 @@
+<% if (it.show) { %>
+  <p><%= it.message %></p>
+<% } else {
+  <%~ it.raw %>
+<% } %>

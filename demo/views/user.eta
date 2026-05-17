@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title><%= it.name %>'s Profile</title>
+</head>
+<body>
+  <h1><%= it.name %></h1>
+
+  <p>Age: <%= it.age %></p>
+
+  <% if (it.bio) { %>
+    <p class="bio"><%= it.bio.trim() %></p>
+  <% } %>
+
+  <p>Role:
+    <span class="badge badge--<%= it.role %>">
+      <%= it.role.toUpperCase() %>
+    </span>
+  </p>
+</body>
+</html>

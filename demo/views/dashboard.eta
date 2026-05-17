@@ -1,0 +1,14 @@
+<div class="dashboard">
+  <h1><%= it.title %></h1>
+
+  <div class="stat-grid">
+    <div class="stat">
+      <span class="stat__label">Visits</span>
+      <span class="stat__value"><%= it.stats.visits.toLocaleString() %></span>
+    </div>
+    <div class="stat">
+      <span class="stat__label">Revenue</span>
+      <span class="stat__value">$<%= it.stats.revenue.toFixed(2) %></span>
+    </div>
+  </div>
+</div>

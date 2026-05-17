@@ -1,0 +1,5 @@
+<!DOCTYPE html>
+<html>
+<head><title><%= it.title %></title></head>
+<body><%~ it.body %></body>
+</html>

@@ -1,0 +1,1 @@
+<% Object.keys(it.obj).forEach(function(key) { %><%= key %>:<%= it.obj[key] %>,<% }) %>

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Eta documentation
+    url: https://eta.js.org/docs/4.x.x/intro/quickstart
+    about: Check Eta runtime syntax and behavior in the official docs.

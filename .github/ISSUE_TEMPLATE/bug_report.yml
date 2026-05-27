@@ -1,0 +1,83 @@
+name: Bug report
+description: Report something broken in Eta language support.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this. Examples help a lot, especially the `.eta` snippet and the TypeScript/JavaScript render call that should provide `it`.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the bug and what you expected instead.
+      placeholder: "Completions show it.any in this template, but the render call passes a typed object."
+    validations:
+      required: true
+
+  - type: textarea
+    id: eta-template
+    attributes:
+      label: Eta template
+      description: Paste the smallest `.eta` snippet that reproduces the issue.
+      render: eta
+    validations:
+      required: false
+
+  - type: textarea
+    id: render-code
+    attributes:
+      label: Render code
+      description: Paste the Eta render call or setup code related to the template.
+      render: ts
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Hover ...
+        3. See ...
+    validations:
+      required: true
+
+  - type: input
+    id: extension-version
+    attributes:
+      label: Extension version
+      placeholder: "0.1.0"
+    validations:
+      required: false
+
+  - type: input
+    id: vscode-version
+    attributes:
+      label: VS Code version
+      placeholder: "1.95.0"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows
+        - macOS
+        - Linux
+        - Other
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional context
+      description: Logs, screenshots, repository links, or anything else that may help.
+    validations:
+      required: false

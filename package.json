@@ -5,6 +5,14 @@
   "version": "0.1.0",
   "publisher": "eta-lang",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ShadowNineX/vscode-eta.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ShadowNineX/vscode-eta/issues"
+  },
+  "homepage": "https://github.com/ShadowNineX/vscode-eta#readme",
   "engines": {
     "vscode": "^1.120.0"
   },
@@ -28,17 +36,18 @@
     "@types/vscode": "^1.120.0",
     "@vitest/ui": "^4.1.6",
     "eta": "^4.6.0",
+    "tsup": "^8.5.1",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "bun run compile",
+    "compile": "tsc -p ./ --noEmit && tsup",
+    "watch": "tsc -watch -p ./ --noEmit",
     "test": "vitest run",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
-    "pretest": "npm run compile"
+    "pretest": "bun run compile"
   },
   "contributes": {
     "languages": [
@@ -127,7 +136,6 @@
     }
   },
   "dependencies": {
-    "typescript": "^6.0.3",
     "vscode-languageclient": "^9.0.1",
     "vscode-languageserver": "^9.0.1",
     "vscode-languageserver-textdocument": "^1.0.12"

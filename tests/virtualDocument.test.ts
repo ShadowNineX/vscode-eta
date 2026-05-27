@@ -164,6 +164,39 @@ describe("buildVirtualContent", () => {
     const vc = buildVirtualContent(source);
     expect(vc).toContain('"%>"');
   });
+
+  it("supports custom delimiters and parse prefixes", () => {
+    const source = "{{: data.name }}";
+    const options = {
+      tags: ["{{", "}}"] as [string, string],
+      parse: { exec: "", interpolate: ":", raw: "!" },
+      customTags: [],
+      varName: "data",
+      useWith: false,
+      functionHeader: "",
+    };
+    const vc = buildVirtualContent(source, "{ name: string }", options);
+    const lines = vc.split("\n");
+
+    expect(lines[0]).toBe("declare const data: { name: string }; declare const it: { name: string };");
+    expect(lines[PREAMBLE_LINE_COUNT]).toContain("data.name");
+  });
+
+  it("masks configured custom tag content instead of sending it to TypeScript", () => {
+    const source = "{{# not TypeScript }} {{= it.name }}";
+    const options = {
+      tags: ["{{", "}}"] as [string, string],
+      parse: { exec: "", interpolate: "=", raw: "~" },
+      customTags: ["#"],
+      varName: "it",
+      useWith: false,
+      functionHeader: "",
+    };
+    const vc = buildVirtualContent(source, "{ name: string }", options);
+
+    expect(vc).not.toContain("not TypeScript");
+    expect(vc).toContain("it.name");
+  });
 });
 
 // ── PREAMBLE_LINE_COUNT ───────────────────────────────────────────────────────
@@ -214,6 +247,67 @@ describe("buildPreamble", () => {
   it("falls back gracefully with DEFAULT_IT_TYPE", () => {
     const p = buildPreamble(DEFAULT_IT_TYPE);
     expect(p).toContain("declare const it: Record<string, any>;");
+  });
+
+  it("uses a custom varName and keeps an it alias for compatibility", () => {
+    const p = buildPreamble("{ name: string }", {
+      tags: ["<%", "%>"],
+      parse: { exec: "", interpolate: "=", raw: "~" },
+      customTags: [],
+      varName: "data",
+      useWith: false,
+      functionHeader: "",
+    });
+
+    expect(p.split("\n")[0]).toBe(
+      "declare const data: { name: string }; declare const it: { name: string };",
+    );
+  });
+
+  it("declares top-level fields for useWith", () => {
+    const p = buildPreamble("{ name: string; age: number }", {
+      tags: ["<%", "%>"],
+      parse: { exec: "", interpolate: "=", raw: "~" },
+      customTags: [],
+      varName: "it",
+      useWith: true,
+      functionHeader: "",
+    });
+
+    expect(p.split("\n")[0]).toContain(
+      'declare const name: typeof it["name"];',
+    );
+    expect(p.split("\n")[0]).toContain(
+      'declare const age: typeof it["age"];',
+    );
+  });
+
+  it("injects functionHeader on the first preamble line", () => {
+    const p = buildPreamble("{ user: { name: string } }", {
+      tags: ["<%", "%>"],
+      parse: { exec: "", interpolate: "=", raw: "~" },
+      customTags: [],
+      varName: "it",
+      useWith: false,
+      functionHeader: "const userName = it.user.name",
+    });
+
+    expect(p.split("\n")[0]).toContain("const userName = it.user.name");
+  });
+
+  it("uses a custom outputFunctionName in Eta builtin declarations", () => {
+    const p = buildPreamble("{ name: string }", {
+      tags: ["<%", "%>"],
+      parse: { exec: "", interpolate: "=", raw: "~" },
+      customTags: [],
+      varName: "it",
+      useWith: false,
+      functionHeader: "",
+      outputFunctionName: "print",
+    });
+
+    expect(p).toContain("declare function print");
+    expect(p).not.toContain("declare function output");
   });
 
   it("includes all Eta builtin declarations", () => {

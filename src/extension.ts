@@ -8,6 +8,11 @@ import {
 } from "vscode-languageclient/node";
 import { createExtensionLogger, type EtaLogger } from "./logging";
 import { findEtaTagRanges } from "./etaScanner";
+import {
+  DEFAULT_ETA_LANGUAGE_OPTIONS,
+  EtaLanguageOptions,
+  normalizeEtaLanguageOptions,
+} from "./etaConfig";
 
 let client: LanguageClient;
 let log: vscode.LogOutputChannel;
@@ -92,41 +97,62 @@ const ETA_BUILTINS: { [key: string]: any } = {
   },
 };
 
-// Tag types and their info
-const TAG_TYPES: { [key: string]: any } = {
-  "<%": { name: "execute", color: "keyword", desc: "Execute JavaScript" },
-  "<%=": {
-    name: "output-escaped",
-    color: "string",
-    desc: "Output escaped value",
-  },
-  "<%~": { name: "output-raw", color: "string", desc: "Output raw HTML" },
-  "<%#": {
-    name: "custom-tag",
-    color: "comment",
-    desc: "Custom tag (user-configured, e.g. comment)",
-  },
-  "<%*": {
-    name: "custom-tag",
-    color: "variable",
-    desc: "Custom tag (user-configured)",
-  },
-  "<%@": {
-    name: "custom-tag",
-    color: "variable",
-    desc: "Custom tag (user-configured)",
-  },
-  "<%-": {
-    name: "whitespace-trim",
-    color: "keyword",
-    desc: "Execute + trim 1 newline before tag",
-  },
-  "<%_": {
-    name: "whitespace-trim",
-    color: "keyword",
-    desc: "Execute + trim all whitespace before tag",
-  },
-};
+function getEtaBuiltins(options: EtaLanguageOptions): { [key: string]: any } {
+  const outputFunctionName = options.outputFunctionName ?? "output";
+  if (outputFunctionName === "output") return ETA_BUILTINS;
+  const builtins = { ...ETA_BUILTINS };
+  delete builtins.output;
+  builtins[outputFunctionName] = {
+    ...ETA_BUILTINS.output,
+    label: outputFunctionName,
+    insertText: `${outputFunctionName}("\${1:content}")$0`,
+  };
+  return builtins;
+}
+
+interface TagTypeInfo {
+  name: string;
+  desc: string;
+}
+
+function getTagTypes(options: EtaLanguageOptions): Record<string, TagTypeInfo> {
+  const [open] = options.tags;
+  const entries: Array<[string, TagTypeInfo]> = [
+    [open, { name: "execute", desc: "Execute JavaScript" }],
+    [
+      `${open}${options.parse.interpolate}`,
+      { name: "output-escaped", desc: "Output escaped value" },
+    ],
+    [
+      `${open}${options.parse.raw}`,
+      { name: "output-raw", desc: "Output raw HTML" },
+    ],
+    ...options.customTags.map(
+      (prefix): [string, TagTypeInfo] => [
+        `${open}${prefix}`,
+        { name: "custom-tag", desc: "Custom tag (user-configured)" },
+      ],
+    ),
+    [
+      `${open}-`,
+      {
+        name: "whitespace-trim",
+        desc: "Execute + trim 1 newline before tag",
+      },
+    ],
+    [
+      `${open}_`,
+      {
+        name: "whitespace-trim",
+        desc: "Execute + trim all whitespace before tag",
+      },
+    ],
+  ];
+
+  return Object.fromEntries(
+    entries.filter(([tag]) => tag.length > open.length),
+  );
+}
 
 function positionToOffset(text: string, line: number, character: number): number {
   const lines = text.split("\n");
@@ -140,12 +166,33 @@ function positionToOffset(text: string, line: number, character: number): number
 function isInsideEtaTag(
   document: vscode.TextDocument,
   position: vscode.Position,
+  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
 ): boolean {
   const text = document.getText();
   const offset = positionToOffset(text, position.line, position.character);
-  return findEtaTagRanges(text).some(
-    (range) => offset >= range.start + 2 && offset < range.end,
+  return findEtaTagRanges(text, options).some(
+    (range) => offset >= range.contentStart && offset < range.end,
   );
+}
+
+function getEtaLanguageOptions(): EtaLanguageOptions {
+  const config = vscode.workspace.getConfiguration("eta");
+  return normalizeEtaLanguageOptions({
+    tags: [
+      config.get<string>("tags.open") ?? "<%",
+      config.get<string>("tags.close") ?? "%>",
+    ],
+    parse: {
+      exec: config.get<string>("parse.exec") ?? "",
+      interpolate: config.get<string>("parse.interpolate") ?? "=",
+      raw: config.get<string>("parse.raw") ?? "~",
+    },
+    customTags: config.get<string[]>("customTags") ?? [],
+    varName: config.get<string>("varName") ?? "it",
+    useWith: config.get<boolean>("useWith") ?? false,
+    functionHeader: config.get<string>("functionHeader") ?? "",
+    outputFunctionName: config.get<string>("outputFunctionName") ?? "output",
+  });
 }
 
 class EtaCompletionProvider implements vscode.CompletionItemProvider {
@@ -160,11 +207,12 @@ class EtaCompletionProvider implements vscode.CompletionItemProvider {
     const completions: vscode.CompletionItem[] = [];
 
     // Check if inside Eta tag
-    const inTag = isInsideEtaTag(document, position);
+    const options = getEtaLanguageOptions();
+    const inTag = isInsideEtaTag(document, position, options);
 
     if (inTag) {
       // Add Eta functions and helpers
-      for (const [, item] of Object.entries(ETA_BUILTINS)) {
+      for (const [, item] of Object.entries(getEtaBuiltins(options))) {
         const completion = new vscode.CompletionItem(item.label, item.kind);
         completion.detail = item.detail;
         completion.documentation = new vscode.MarkdownString(
@@ -174,6 +222,14 @@ class EtaCompletionProvider implements vscode.CompletionItemProvider {
           completion.insertText = new vscode.SnippetString(item.insertText);
         }
         completions.push(completion);
+      }
+      if (options.varName !== "it") {
+        const item = new vscode.CompletionItem(
+          options.varName,
+          vscode.CompletionItemKind.Variable,
+        );
+        item.detail = "Template data object";
+        completions.push(item);
       }
 
       // Add common JavaScript methods/functions
@@ -233,34 +289,33 @@ class EtaCompletionProvider implements vscode.CompletionItemProvider {
     }
 
     // Tag trigger completions
-    if (lineUpto.endsWith("<%")) {
+    const [open] = options.tags;
+    if (lineUpto.endsWith(open)) {
       const tagCompletions = [
-        { label: "<%", insertText: "<%", detail: "Execute JavaScript" },
-        { label: "<%=", insertText: "<%=", detail: "Output escaped value" },
-        { label: "<%~", insertText: "<%~", detail: "Output raw HTML" },
+        { label: open, insertText: open, detail: "Execute JavaScript" },
         {
-          label: "<%#",
-          insertText: "<%#",
-          detail: "Custom tag (user-configured)",
+          label: `${open}${options.parse.interpolate}`,
+          insertText: `${open}${options.parse.interpolate}`,
+          detail: "Output escaped value",
         },
         {
-          label: "<%*",
-          insertText: "<%*",
-          detail: "Custom tag (user-configured)",
+          label: `${open}${options.parse.raw}`,
+          insertText: `${open}${options.parse.raw}`,
+          detail: "Output raw HTML",
         },
-        {
-          label: "<%@",
-          insertText: "<%@",
+        ...options.customTags.map((prefix) => ({
+          label: `${open}${prefix}`,
+          insertText: `${open}${prefix}`,
           detail: "Custom tag (user-configured)",
-        },
+        })),
         {
-          label: "<%-",
-          insertText: "<%-",
+          label: `${open}-`,
+          insertText: `${open}-`,
           detail: "Execute + trim 1 newline before",
         },
         {
-          label: "<%_",
-          insertText: "<%_",
+          label: `${open}_`,
+          insertText: `${open}_`,
           detail: "Execute + trim all whitespace before",
         },
       ];
@@ -300,8 +355,9 @@ class EtaHoverProvider implements vscode.HoverProvider {
     const word = document.getText(range);
 
     // Check if word is in our builtins
-    if (ETA_BUILTINS[word]) {
-      const item = ETA_BUILTINS[word];
+    const builtins = getEtaBuiltins(getEtaLanguageOptions());
+    if (builtins[word]) {
+      const item = builtins[word];
       const markdown = new vscode.MarkdownString();
       markdown.appendMarkdown(`**${item.label}**\n\n`);
       markdown.appendMarkdown(`${item.detail}\n\n`);
@@ -313,7 +369,7 @@ class EtaHoverProvider implements vscode.HoverProvider {
     // Check if hovering over a tag opener.
     // Sort longest-first so <%=, <%~, <%# etc. match before the bare <%.
     const line = document.lineAt(position).text;
-    const sortedTags = Object.entries(TAG_TYPES).sort(
+    const sortedTags = Object.entries(getTagTypes(getEtaLanguageOptions())).sort(
       (a, b) => b[0].length - a[0].length,
     );
     for (const [tag, info] of sortedTags) {
@@ -347,7 +403,7 @@ class EtaDiagnosticsProvider {
   provideDiagnostics(document: vscode.TextDocument): void {
     const diagnostics: vscode.Diagnostic[] = [];
     const text = document.getText();
-    const ranges = findEtaTagRanges(text);
+    const ranges = findEtaTagRanges(text, getEtaLanguageOptions());
 
     for (const tag of ranges) {
       const start = document.positionAt(tag.start);
@@ -401,6 +457,7 @@ export function activate(context: vscode.ExtensionContext): void {
       "eta",
       completionProvider,
       "<",
+      "{",
       ".",
       " ",
     ),
@@ -439,10 +496,14 @@ export function activate(context: vscode.ExtensionContext): void {
   };
   const clientOptions: LanguageClientOptions = {
     documentSelector: [{ scheme: "file", language: "eta" }],
+    initializationOptions: {
+      etaLanguageOptions: getEtaLanguageOptions(),
+    },
     synchronize: {
+      configurationSection: "eta",
       // Forward TS/JS file changes to the server so it can re-infer `it` types
       fileEvents: vscode.workspace.createFileSystemWatcher(
-        "**/*.{ts,tsx,js,jsx}",
+        "**/*.{ts,tsx,js,jsx,eta}",
       ),
     },
   };

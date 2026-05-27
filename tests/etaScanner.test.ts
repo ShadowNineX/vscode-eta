@@ -27,13 +27,27 @@ describe("consumeTagOpener", () => {
   });
 
   it("handles <%# (custom comment)", () => {
-    const r = consumeTagOpener("<%# comment %>", 0);
+    const r = consumeTagOpener("<%# comment %>", 0, {
+      tags: ["<%", "%>"],
+      parse: { exec: "", interpolate: "=", raw: "~" },
+      customTags: ["#"],
+      varName: "it",
+      useWith: false,
+      functionHeader: "",
+    });
     expect(r.padLen).toBe(3);
     expect(r.next).toBe(3);
   });
 
   it("handles <%* (custom tag)", () => {
-    const r = consumeTagOpener("<%* key %>", 0);
+    const r = consumeTagOpener("<%* key %>", 0, {
+      tags: ["<%", "%>"],
+      parse: { exec: "", interpolate: "=", raw: "~" },
+      customTags: ["*"],
+      varName: "it",
+      useWith: false,
+      functionHeader: "",
+    });
     expect(r.padLen).toBe(3);
     expect(r.next).toBe(3);
   });
@@ -67,6 +81,36 @@ describe("consumeTagOpener", () => {
     const r = consumeTagOpener("<%_~ it.x %>", 0);
     expect(r.padLen).toBe(4);
     expect(r.next).toBe(4);
+  });
+
+  it("handles custom delimiters and parse prefixes", () => {
+    const r = consumeTagOpener("{{: data.name }}", 0, {
+      tags: ["{{", "}}"],
+      parse: { exec: "", interpolate: ":", raw: "!" },
+      customTags: ["#"],
+      varName: "data",
+      useWith: false,
+      functionHeader: "",
+    });
+
+    expect(r.padLen).toBe(3);
+    expect(r.next).toBe(3);
+    expect(r.prefix).toBe(":");
+    expect(r.contentIsJs).toBe(true);
+  });
+
+  it("marks configured custom tag prefixes as non-JavaScript content", () => {
+    const r = consumeTagOpener("{{# markdown }}", 0, {
+      tags: ["{{", "}}"],
+      parse: { exec: "", interpolate: "=", raw: "~" },
+      customTags: ["#"],
+      varName: "it",
+      useWith: false,
+      functionHeader: "",
+    });
+
+    expect(r.next).toBe(3);
+    expect(r.contentIsJs).toBe(false);
   });
 });
 
@@ -117,6 +161,20 @@ describe("consumeTagContent", () => {
     expect(js).toBe("/* %> */ value   ");
     expect(next).toBe(17);
   });
+
+  it("reads until a custom closing delimiter", () => {
+    const { js, next } = consumeTagContent(" data.name }}", 0, {
+      tags: ["{{", "}}"],
+      parse: { exec: "", interpolate: ":", raw: "!" },
+      customTags: [],
+      varName: "data",
+      useWith: false,
+      functionHeader: "",
+    });
+
+    expect(js).toBe(" data.name   ");
+    expect(next).toBe(13);
+  });
 });
 
 describe("findEtaTagRanges", () => {
@@ -135,5 +193,20 @@ describe("findEtaTagRanges", () => {
   it("marks empty tags", () => {
     const ranges = findEtaTagRanges("<% %>");
     expect(ranges[0].empty).toBe(true);
+  });
+
+  it("finds ranges with custom delimiters", () => {
+    const ranges = findEtaTagRanges("Hello {{= it.name }}!", {
+      tags: ["{{", "}}"],
+      parse: { exec: "", interpolate: "=", raw: "~" },
+      customTags: [],
+      varName: "it",
+      useWith: false,
+      functionHeader: "",
+    });
+
+    expect(ranges).toHaveLength(1);
+    expect(ranges[0].closed).toBe(true);
+    expect(ranges[0].contentStart).toBe(9);
   });
 });

@@ -19,10 +19,19 @@ import { isInsideEtaTagInText, positionToOffset } from "./position";
 import { tsKindToLSP } from "./lspKind";
 import { createServerLogger } from "./logging";
 import {
+  DEFAULT_ETA_LANGUAGE_OPTIONS,
+  EtaLanguageOptions,
+  applyNonDefaultEtaLanguageOptions,
+  normalizeEtaLanguageOptions,
+} from "./etaConfig";
+import {
   analyzeWorkspaceFiles,
+  getEtaLanguageOptionsForUri,
   getItTypeForUri,
   scanWorkspaceFiles,
   templateDataTypeMap,
+  templateLanguageOptionsMap,
+  workspaceEtaFiles,
   workspaceTsFiles,
 } from "./typeInference";
 
@@ -47,10 +56,14 @@ export {
 export { tsKindToLSP } from "./lspKind";
 export {
   analyzeFileForEtaCalls,
+  analyzeEtaTemplateLayouts,
   analyzeWorkspaceFiles,
+  getEtaLanguageOptionsForUri,
   getItTypeForUri,
   scanWorkspaceFiles,
   templateDataTypeMap,
+  templateLanguageOptionsMap,
+  workspaceEtaFiles,
   typeToStructuralString,
   workspaceTsFiles,
 } from "./typeInference";
@@ -69,6 +82,7 @@ let workspaceAnalyzed = false;
 let nextVirtualId = 0;
 let serviceVersion = 0;
 let languageService: ts.LanguageService | null = null;
+let etaLanguageOptions: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS;
 
 function getVirtualPath(uri: string): string {
   let vp = uriToVirtualPath.get(uri);
@@ -87,6 +101,7 @@ function ensureWorkspaceAnalyzed(): void {
 
 function runWorkspaceAnalysis(): void {
   templateDataTypeMap.clear();
+  templateLanguageOptionsMap.clear();
   serviceVersion++;
 
   const rootNames = [...workspaceTsFiles];
@@ -118,11 +133,28 @@ function runWorkspaceAnalysis(): void {
   rebuildOpenVirtualFiles();
 }
 
+function getDocumentLanguageOptions(uri: string): EtaLanguageOptions {
+  const inferredOptions =
+    getEtaLanguageOptionsForUri(uri) ?? DEFAULT_ETA_LANGUAGE_OPTIONS;
+  return applyNonDefaultEtaLanguageOptions(
+    inferredOptions,
+    etaLanguageOptions,
+  );
+}
+
 function rebuildOpenVirtualFiles(): void {
   for (const uri of uriToVirtualPath.keys()) {
     const doc = documents.get(uri);
     if (doc) updateVirtualFile(uri, doc.getText());
   }
+}
+
+function isWorkspaceSourceFile(fsPath: string): boolean {
+  return [".ts", ".tsx", ".js", ".jsx"].includes(path.extname(fsPath));
+}
+
+function isEtaTemplateFile(fsPath: string): boolean {
+  return path.extname(fsPath) === ".eta";
 }
 
 function getLanguageService(): ts.LanguageService {
@@ -168,7 +200,12 @@ function getLanguageService(): ts.LanguageService {
 function updateVirtualFile(uri: string, etaSource: string): void {
   const virtualPath = getVirtualPath(uri);
   const itType = getItTypeForUri(uri);
-  const newContent = buildVirtualContent(etaSource, itType);
+  const options = getDocumentLanguageOptions(uri);
+  const newContent = buildVirtualContent(
+    etaSource,
+    itType,
+    options,
+  );
 
   if (virtualContents.get(virtualPath) !== newContent) {
     virtualContents.set(virtualPath, newContent);
@@ -184,6 +221,9 @@ function updateVirtualFile(uri: string, etaSource: string): void {
 }
 
 connection.onInitialize((params: InitializeParams): InitializeResult => {
+  etaLanguageOptions = normalizeEtaLanguageOptions(
+    params.initializationOptions?.etaLanguageOptions,
+  );
   const rootUri = params.workspaceFolders?.[0]?.uri;
   if (rootUri) {
     try {
@@ -198,11 +238,19 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
       textDocumentSync: TextDocumentSyncKind.Incremental,
       completionProvider: {
         resolveProvider: false,
-        triggerCharacters: [".", "(", '"', "'"],
+        triggerCharacters: [".", "(", '"', "'", "{", "<"],
       },
       hoverProvider: true,
     },
   };
+});
+
+connection.onDidChangeConfiguration?.((change) => {
+  etaLanguageOptions = normalizeEtaLanguageOptions(
+    change.settings?.etaLanguageOptions ?? change.settings?.eta,
+  );
+  serviceVersion++;
+  rebuildOpenVirtualFiles();
 });
 
 documents.onDidOpen((event) => {
@@ -228,8 +276,13 @@ connection.onDidChangeWatchedFiles((params) => {
       const fsPath = fileURLToPath(change.uri);
       if (change.type === FileChangeType.Deleted) {
         workspaceTsFiles.delete(fsPath);
-      } else {
+        workspaceEtaFiles.delete(fsPath);
+      } else if (isWorkspaceSourceFile(fsPath)) {
         workspaceTsFiles.add(fsPath);
+      } else if (isEtaTemplateFile(fsPath)) {
+        workspaceEtaFiles.add(fsPath);
+      } else {
+        continue;
       }
       needsReanalysis = true;
     } catch {
@@ -249,6 +302,7 @@ connection.onCompletion((params: TextDocumentPositionParams) => {
       docText,
       params.position.line,
       params.position.character,
+      getDocumentLanguageOptions(params.textDocument.uri),
     )
   ) {
     return [];
@@ -288,6 +342,7 @@ connection.onHover((params: TextDocumentPositionParams): Hover | null => {
       docText,
       params.position.line,
       params.position.character,
+      getDocumentLanguageOptions(params.textDocument.uri),
     )
   ) {
     return null;

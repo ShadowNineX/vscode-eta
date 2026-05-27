@@ -54,7 +54,65 @@
         "language": "eta",
         "path": "./snippets/eta.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Eta",
+      "properties": {
+        "eta.tags.open": {
+          "type": "string",
+          "default": "<%",
+          "description": "Eta opening delimiter."
+        },
+        "eta.tags.close": {
+          "type": "string",
+          "default": "%>",
+          "description": "Eta closing delimiter."
+        },
+        "eta.parse.exec": {
+          "type": "string",
+          "default": "",
+          "description": "Eta evaluation tag prefix."
+        },
+        "eta.parse.interpolate": {
+          "type": "string",
+          "default": "=",
+          "description": "Eta escaped interpolation tag prefix."
+        },
+        "eta.parse.raw": {
+          "type": "string",
+          "default": "~",
+          "description": "Eta raw interpolation tag prefix."
+        },
+        "eta.customTags": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "description": "Custom Eta tag prefixes. Eta runtime customTags are handler functions; list only their prefixes here for language support."
+        },
+        "eta.varName": {
+          "type": "string",
+          "default": "it",
+          "description": "Name of the Eta template data variable."
+        },
+        "eta.useWith": {
+          "type": "boolean",
+          "default": false,
+          "description": "Expose top-level properties from the inferred data object as template variables."
+        },
+        "eta.functionHeader": {
+          "type": "string",
+          "default": "",
+          "description": "JavaScript/TypeScript declarations to inject before template code for language features."
+        },
+        "eta.outputFunctionName": {
+          "type": "string",
+          "default": "output",
+          "description": "Name of the Eta output helper function."
+        }
+      }
+    }
   },
   "dependencies": {
     "typescript": "^6.0.3",

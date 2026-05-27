@@ -1,26 +1,46 @@
 import * as ts from "typescript";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  applyNonDefaultEtaLanguageOptions,
+  DEFAULT_ETA_LANGUAGE_OPTIONS,
+  EtaLanguageOptions,
+  normalizeEtaLanguageOptions,
+} from "./etaConfig";
+import { findEtaTagRanges } from "./etaScanner";
 import { DEFAULT_IT_TYPE } from "./virtualDocument";
 
 /** Absolute fs paths of every .ts/.js file found in the workspace. */
 export const workspaceTsFiles = new Set<string>();
+/** Absolute fs paths of every .eta file found in the workspace. */
+export const workspaceEtaFiles = new Set<string>();
 /** Maps Eta template basename (no extension) -> inferred `it` type string. */
 export const templateDataTypeMap = new Map<string, string>();
+/** Maps Eta template basename (no extension) -> statically inferred Eta config. */
+export const templateLanguageOptionsMap = new Map<string, EtaLanguageOptions>();
 
 /** Scan the workspace root for TS/JS source files (excludes node_modules etc.). */
 export function scanWorkspaceFiles(root: string): void {
   try {
-    const files = ts.sys.readDirectory(
+    const sourceFiles = ts.sys.readDirectory(
       root,
       [".ts", ".tsx", ".js", ".jsx"],
       ["node_modules", ".git", "out", "dist", "build"],
     );
-    for (const f of files) {
+    for (const f of sourceFiles) {
       // ts.sys.readDirectory only excludes top-level directory names; nested
       // node_modules (e.g. demo/node_modules) still need this check.
       if (f.includes("node_modules")) continue;
       workspaceTsFiles.add(f);
+    }
+    const etaFiles = ts.sys.readDirectory(
+      root,
+      [".eta"],
+      ["node_modules", ".git", "out", "dist", "build"],
+    );
+    for (const f of etaFiles) {
+      if (f.includes("node_modules")) continue;
+      workspaceEtaFiles.add(f);
     }
   } catch {
     // silently ignore; proceed without workspace context
@@ -159,23 +179,265 @@ function getCalledMethodName(expr: ts.Expression): string | undefined {
   return undefined;
 }
 
+function getCallReceiverName(expr: ts.Expression): string | undefined {
+  if (
+    ts.isPropertyAccessExpression(expr) &&
+    ts.isIdentifier(expr.expression)
+  ) {
+    return expr.expression.text;
+  }
+  return undefined;
+}
+
+function getPropertyName(name: ts.PropertyName): string | undefined {
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+  return undefined;
+}
+
+function getObjectProperty(
+  object: ts.ObjectLiteralExpression,
+  propertyName: string,
+): ts.Expression | undefined {
+  for (const property of object.properties) {
+    if (!ts.isPropertyAssignment(property)) continue;
+    const name = getPropertyName(property.name);
+    if (name === propertyName) return property.initializer;
+  }
+  return undefined;
+}
+
+function getStringLiteralValue(expr: ts.Expression): string | undefined {
+  return ts.isStringLiteral(expr) ? expr.text : undefined;
+}
+
+function getBooleanLiteralValue(expr: ts.Expression): boolean | undefined {
+  if (expr.kind === ts.SyntaxKind.TrueKeyword) return true;
+  if (expr.kind === ts.SyntaxKind.FalseKeyword) return false;
+  return undefined;
+}
+
+function getStringArrayLiteralValue(expr: ts.Expression): string[] | undefined {
+  if (!ts.isArrayLiteralExpression(expr)) return undefined;
+  const values: string[] = [];
+  for (const element of expr.elements) {
+    if (!ts.isStringLiteral(element)) return undefined;
+    values.push(element.text);
+  }
+  return values;
+}
+
+function getCustomTagPrefixes(expr: ts.Expression): string[] | undefined {
+  if (ts.isObjectLiteralExpression(expr)) {
+    return expr.properties.flatMap((property) => {
+      if (!ts.isPropertyAssignment(property)) return [];
+      const name = getPropertyName(property.name);
+      return name === undefined ? [] : [name];
+    });
+  }
+  return getStringArrayLiteralValue(expr);
+}
+
+function getTagsConfig(
+  object: ts.ObjectLiteralExpression,
+): [string, string] | undefined {
+  const tags = getObjectProperty(object, "tags");
+  const values = tags ? getStringArrayLiteralValue(tags) : undefined;
+  return values && values.length >= 2 ? [values[0], values[1]] : undefined;
+}
+
+function getParseConfig(
+  object: ts.ObjectLiteralExpression,
+): EtaLanguageOptions["parse"] | undefined {
+  const parse = getObjectProperty(object, "parse");
+  if (!parse || !ts.isObjectLiteralExpression(parse)) return undefined;
+
+  const config: Partial<EtaLanguageOptions["parse"]> = {};
+  const exec = getObjectProperty(parse, "exec");
+  const interpolate = getObjectProperty(parse, "interpolate");
+  const raw = getObjectProperty(parse, "raw");
+
+  if (exec) config.exec = getStringLiteralValue(exec) ?? "";
+  if (interpolate) config.interpolate = getStringLiteralValue(interpolate) ?? "=";
+  if (raw) config.raw = getStringLiteralValue(raw) ?? "~";
+
+  return config as EtaLanguageOptions["parse"];
+}
+
+function getStringProperty(
+  object: ts.ObjectLiteralExpression,
+  propertyName: string,
+): string | undefined {
+  const value = getObjectProperty(object, propertyName);
+  return value ? getStringLiteralValue(value) : undefined;
+}
+
+function getBooleanProperty(
+  object: ts.ObjectLiteralExpression,
+  propertyName: string,
+): boolean | undefined {
+  const value = getObjectProperty(object, propertyName);
+  return value ? getBooleanLiteralValue(value) : undefined;
+}
+
+function getEtaConfigFromObjectLiteral(
+  object: ts.ObjectLiteralExpression,
+): Partial<EtaLanguageOptions> {
+  const config: Partial<EtaLanguageOptions> = {};
+
+  const tags = getTagsConfig(object);
+  if (tags) config.tags = tags;
+
+  const parse = getParseConfig(object);
+  if (parse) config.parse = parse;
+
+  const customTags = getObjectProperty(object, "customTags");
+  const customTagPrefixes = customTags
+    ? getCustomTagPrefixes(customTags)
+    : undefined;
+  if (customTagPrefixes) config.customTags = customTagPrefixes;
+
+  config.varName = getStringProperty(object, "varName");
+
+  config.useWith = getBooleanProperty(object, "useWith");
+
+  config.functionHeader = getStringProperty(object, "functionHeader");
+
+  config.outputFunctionName = getStringProperty(object, "outputFunctionName");
+
+  return config;
+}
+
+function getEtaConfigFromExpression(
+  expr: ts.Expression | undefined,
+): EtaLanguageOptions {
+  if (!expr || !ts.isObjectLiteralExpression(expr)) {
+    return DEFAULT_ETA_LANGUAGE_OPTIONS;
+  }
+  return normalizeEtaLanguageOptions(getEtaConfigFromObjectLiteral(expr));
+}
+
+function isNewEtaExpression(expr: ts.Expression): expr is ts.NewExpression {
+  return (
+    ts.isNewExpression(expr) &&
+    ((ts.isIdentifier(expr.expression) && expr.expression.text === "Eta") ||
+      (ts.isPropertyAccessExpression(expr.expression) &&
+        expr.expression.name.text === "Eta"))
+  );
+}
+
+function collectEtaInstanceConfigs(
+  sourceFile: ts.SourceFile,
+): Map<string, EtaLanguageOptions> {
+  const configs = new Map<string, EtaLanguageOptions>();
+
+  function visit(node: ts.Node): void {
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer &&
+      isNewEtaExpression(node.initializer)
+    ) {
+      configs.set(
+        node.name.text,
+        getEtaConfigFromExpression(node.initializer.arguments?.[0]),
+      );
+    }
+
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      node.expression.name.text === "configure" &&
+      ts.isIdentifier(node.expression.expression)
+    ) {
+      const instanceName = node.expression.expression.text;
+      const base = configs.get(instanceName) ?? DEFAULT_ETA_LANGUAGE_OPTIONS;
+      const override = getEtaConfigFromExpression(node.arguments[0]);
+      configs.set(instanceName, applyNonDefaultEtaLanguageOptions(base, override));
+    }
+
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return configs;
+}
+
+function mergeTemplateType(key: string, typeStr: string): void {
+  const existing = templateDataTypeMap.get(key);
+  templateDataTypeMap.set(
+    key,
+    existing && existing !== typeStr ? `${existing} & ${typeStr}` : typeStr,
+  );
+}
+
 function recordRenderCallType(
   templateName: string,
   dataArg: ts.Expression,
   checker: ts.TypeChecker,
+  languageOptions?: EtaLanguageOptions,
 ): void {
   const basename = path.basename(templateName, path.extname(templateName));
+  if (languageOptions) {
+    templateLanguageOptionsMap.set(basename, languageOptions);
+  }
   try {
     const type = checker.getTypeAtLocation(dataArg);
     const typeStr = typeToStructuralString(checker, type);
     if (typeStr === "any" || typeStr === "unknown") return;
-    const existing = templateDataTypeMap.get(basename);
-    templateDataTypeMap.set(
-      basename,
-      existing && existing !== typeStr ? `${existing} & ${typeStr}` : typeStr,
-    );
+    mergeTemplateType(basename, typeStr);
   } catch {
     // type extraction failed for this call; skip
+  }
+}
+
+function withLayoutBody(typeStr: string): string {
+  if (/\bbody\??:/.test(typeStr)) return typeStr;
+  const trimmed = typeStr.trim();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    return trimmed.replace(/\s*}$/, "; body: string }");
+  }
+  return `{ body: string } & ${trimmed}`;
+}
+
+function extractLayoutTemplateNames(
+  source: string,
+  options: EtaLanguageOptions,
+): string[] {
+  const names: string[] = [];
+  for (const range of findEtaTagRanges(source, options)) {
+    const content = source.slice(range.contentStart, range.end);
+    const matches = content.matchAll(/\blayout\s*\(\s*["']([^"']+)["']/g);
+    for (const match of matches) {
+      const layoutName = match[1];
+      if (layoutName) names.push(layoutName);
+    }
+  }
+  return names;
+}
+
+function templateKeyFromPath(filePath: string): string {
+  return path.basename(filePath, path.extname(filePath));
+}
+
+export function analyzeEtaTemplateLayouts(etaFiles: string[]): void {
+  for (const etaFile of etaFiles) {
+    const childKey = templateKeyFromPath(etaFile);
+    const childType = templateDataTypeMap.get(childKey);
+    if (!childType) continue;
+
+    const source = ts.sys.readFile(etaFile);
+    if (source === undefined) continue;
+
+    const options =
+      templateLanguageOptionsMap.get(childKey) ?? DEFAULT_ETA_LANGUAGE_OPTIONS;
+    for (const layoutName of extractLayoutTemplateNames(source, options)) {
+      const layoutKey = templateKeyFromPath(layoutName);
+      if (layoutKey === childKey) continue;
+      mergeTemplateType(layoutKey, withLayoutBody(childType));
+      if (!templateLanguageOptionsMap.has(layoutKey)) {
+        templateLanguageOptionsMap.set(layoutKey, options);
+      }
+    }
   }
 }
 
@@ -187,13 +449,21 @@ export function analyzeFileForEtaCalls(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
 ): void {
+  const etaInstanceConfigs = collectEtaInstanceConfigs(sourceFile);
+
   function visit(node: ts.Node): void {
     if (ts.isCallExpression(node)) {
       const methodName = getCalledMethodName(node.expression);
       if (methodName && ETA_NAMED_TEMPLATE_RENDER_METHODS.has(methodName)) {
         const args = node.arguments;
         if (args.length >= 2 && ts.isStringLiteral(args[0])) {
-          recordRenderCallType(args[0].text, args[1], checker);
+          const receiverName = getCallReceiverName(node.expression);
+          recordRenderCallType(
+            args[0].text,
+            args[1],
+            checker,
+            receiverName ? etaInstanceConfigs.get(receiverName) : undefined,
+          );
         }
       }
     }
@@ -249,6 +519,7 @@ export function analyzeWorkspaceFiles(
       if (sf.isDeclarationFile || !rootSet.has(sf.fileName)) continue;
       analyzeOneSourceFile(sf, checker, hooks);
     }
+    analyzeEtaTemplateLayouts([...workspaceEtaFiles]);
   } catch (e) {
     hooks.onFailure?.(e);
   }
@@ -262,5 +533,17 @@ export function getItTypeForUri(uri: string): string {
     return templateDataTypeMap.get(basename) ?? DEFAULT_IT_TYPE;
   } catch {
     return DEFAULT_IT_TYPE;
+  }
+}
+
+export function getEtaLanguageOptionsForUri(
+  uri: string,
+): EtaLanguageOptions | undefined {
+  try {
+    const fsPath = fileURLToPath(uri);
+    const basename = path.basename(fsPath, path.extname(fsPath));
+    return templateLanguageOptionsMap.get(basename);
+  } catch {
+    return undefined;
   }
 }

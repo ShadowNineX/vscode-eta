@@ -1,4 +1,8 @@
 import { findEtaTagRanges } from "./etaScanner";
+import {
+  DEFAULT_ETA_LANGUAGE_OPTIONS,
+  EtaLanguageOptions,
+} from "./etaConfig";
 
 export function positionToOffset(
   content: string,
@@ -13,17 +17,22 @@ export function positionToOffset(
   return offset + character;
 }
 
-export function isInsideEtaTag(line: string, character: number): boolean {
-  return isInsideEtaTagInText(line, 0, character);
+export function isInsideEtaTag(
+  line: string,
+  character: number,
+  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
+): boolean {
+  return isInsideEtaTagInText(line, 0, character, options);
 }
 
 export function isInsideEtaTagInText(
   text: string,
   line: number,
   character: number,
+  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
 ): boolean {
   const offset = positionToOffset(text, line, character);
-  return findEtaTagRanges(text).some(
-    (range) => offset >= range.start + 2 && offset < range.end,
+  return findEtaTagRanges(text, options).some(
+    (range) => offset >= range.contentStart && offset < range.end,
   );
 }

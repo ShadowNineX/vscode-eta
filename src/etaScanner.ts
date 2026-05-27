@@ -1,3 +1,10 @@
+import {
+  DEFAULT_ETA_LANGUAGE_OPTIONS,
+  EtaLanguageOptions,
+  getTagPrefixCandidates,
+  isJavaScriptTagPrefix,
+} from "./etaConfig";
+
 type Quote = '"' | "'" | "`";
 
 interface TagContentState {
@@ -13,6 +20,7 @@ export interface TagContentChunk {
 
 export interface EtaTagRange {
   start: number;
+  contentStart: number;
   end: number;
   closed: boolean;
   empty: boolean;
@@ -22,8 +30,10 @@ export interface EtaTagRange {
 export function consumeTagOpener(
   line: string,
   start: number,
-): { padLen: number; next: number } {
-  let i = start + 2; // skip <%
+  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
+): { padLen: number; next: number; prefix: string; contentIsJs: boolean } {
+  const [open] = options.tags;
+  let i = start + open.length;
   if (i < line.length && (line[i] === "-" || line[i] === "_")) {
     i++;
   }
@@ -31,10 +41,24 @@ export function consumeTagOpener(
   while (prefix < line.length && /[ \t]/.test(line[prefix])) {
     prefix++;
   }
-  if (prefix < line.length && "=~#*@".includes(line[prefix])) {
-    i = prefix + 1; // tag prefix, e.g. <%=, <%~, <%- =, <%@
+
+  for (const candidate of getTagPrefixCandidates(options)) {
+    if (line.startsWith(candidate, prefix)) {
+      return {
+        padLen: prefix + candidate.length - start,
+        next: prefix + candidate.length,
+        prefix: candidate,
+        contentIsJs: isJavaScriptTagPrefix(candidate, options),
+      };
+    }
   }
-  return { padLen: i - start, next: i };
+
+  return {
+    padLen: i - start,
+    next: i,
+    prefix: options.parse.exec,
+    contentIsJs: options.parse.exec === "",
+  };
 }
 
 function consumeLineCommentChar(
@@ -108,16 +132,17 @@ function consumeStateStart(
 function consumeTagCloser(
   line: string,
   index: number,
+  options: EtaLanguageOptions,
 ): TagContentChunk | undefined {
-  if (line[index] === "%" && line[index + 1] === ">") {
-    return { js: "  ", next: index + 2 };
+  const close = options.tags[1];
+  if (line.startsWith(close, index)) {
+    return { js: " ".repeat(close.length), next: index + close.length };
   }
   if (
     (line[index] === "-" || line[index] === "_") &&
-    line[index + 1] === "%" &&
-    line[index + 2] === ">"
+    line.startsWith(close, index + 1)
   ) {
-    return { js: "   ", next: index + 3 };
+    return { js: " ".repeat(close.length + 1), next: index + close.length + 1 };
   }
   return undefined;
 }
@@ -126,6 +151,7 @@ function consumeTagCloser(
 export function consumeTagContent(
   line: string,
   start: number,
+  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
 ): TagContentChunk {
   const state: TagContentState = {
     quote: undefined,
@@ -144,7 +170,7 @@ export function consumeTagContent(
       i = chunk.next;
       continue;
     }
-    const closer = consumeTagCloser(line, i);
+    const closer = consumeTagCloser(line, i, options);
     if (closer) return { js: js + closer.js, next: closer.next };
     js += line[i];
     i++;
@@ -156,26 +182,36 @@ export function isClosedTagContent(
   source: string,
   from: number,
   to: number,
+  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
 ): boolean {
+  const close = options.tags[1];
   return (
     to > from &&
-    (source.slice(to - 2, to) === "%>" ||
-      /^[-_]%>$/.test(source.slice(to - 3, to)))
+    (source.slice(to - close.length, to) === close ||
+      (to > close.length &&
+        (source[to - close.length - 1] === "-" ||
+          source[to - close.length - 1] === "_") &&
+        source.slice(to - close.length, to) === close))
   );
 }
 
-function consumeEtaTagRange(source: string, start: number): EtaTagRange {
-  const opener = consumeTagOpener(source, start);
+function consumeEtaTagRange(
+  source: string,
+  start: number,
+  options: EtaLanguageOptions,
+): EtaTagRange {
+  const opener = consumeTagOpener(source, start, options);
   let cursor = opener.next;
   let content = "";
 
   while (cursor < source.length) {
-    const consumed = consumeTagContent(source, cursor);
+    const consumed = consumeTagContent(source, cursor, options);
     content += consumed.js;
     cursor = consumed.next;
-    if (isClosedTagContent(source, opener.next, cursor)) {
+    if (isClosedTagContent(source, opener.next, cursor, options)) {
       return {
         start,
+        contentStart: opener.next,
         end: cursor,
         closed: true,
         empty: content.trim().length === 0,
@@ -185,25 +221,30 @@ function consumeEtaTagRange(source: string, start: number): EtaTagRange {
 
   return {
     start,
+    contentStart: opener.next,
     end: cursor,
     closed: false,
     empty: content.trim().length === 0,
   };
 }
 
-export function findEtaTagRanges(source: string): EtaTagRange[] {
+export function findEtaTagRanges(
+  source: string,
+  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
+): EtaTagRange[] {
   const ranges: EtaTagRange[] = [];
   let i = 0;
+  const [open] = options.tags;
 
   while (i < source.length) {
-    if (source[i] !== "<" || source[i + 1] !== "%") {
+    if (!source.startsWith(open, i)) {
       i++;
       continue;
     }
 
-    const range = consumeEtaTagRange(source, i);
+    const range = consumeEtaTagRange(source, i, options);
     ranges.push(range);
-    i = Math.max(range.end, range.start + 2);
+    i = Math.max(range.end, range.start + open.length);
   }
 
   return ranges;

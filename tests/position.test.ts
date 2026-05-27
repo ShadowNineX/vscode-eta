@@ -62,6 +62,20 @@ describe("isInsideEtaTagInText", () => {
     const text = "<% if (it.show) {\n output('yes')\n} %>\n<p>done</p>";
     expect(isInsideEtaTagInText(text, 3, 1)).toBe(false);
   });
+
+  it("supports custom delimiters", () => {
+    const text = "Hello {{= data.name }}";
+    expect(
+      isInsideEtaTagInText(text, 0, text.indexOf("data.name"), {
+        tags: ["{{", "}}"],
+        parse: { exec: "", interpolate: "=", raw: "~" },
+        customTags: [],
+        varName: "data",
+        useWith: false,
+        functionHeader: "",
+      }),
+    ).toBe(true);
+  });
 });
 
 // ── positionToOffset ──────────────────────────────────────────────────────────

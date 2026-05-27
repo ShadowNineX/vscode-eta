@@ -1,13 +1,19 @@
 import { describe, it, expect, beforeEach, beforeAll } from "vitest";
 import * as ts from "typescript";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_IT_TYPE } from "../src/virtualDocument";
 import {
+  analyzeEtaTemplateLayouts,
   analyzeFileForEtaCalls,
   getItTypeForUri,
   scanWorkspaceFiles,
   templateDataTypeMap,
+  templateLanguageOptionsMap,
   typeToStructuralString,
+  workspaceEtaFiles,
   workspaceTsFiles,
 } from "../src/typeInference";
 
@@ -188,7 +194,10 @@ describe("typeToStructuralString", () => {
 // ── analyzeFileForEtaCalls ────────────────────────────────────────────────────────
 
 describe("analyzeFileForEtaCalls", () => {
-  beforeEach(() => templateDataTypeMap.clear());
+  beforeEach(() => {
+    templateDataTypeMap.clear();
+    templateLanguageOptionsMap.clear();
+  });
 
   it("detects eta.render() call with object literal and maps basename", () => {
     const { checker, sf } = makeTestProgram(
@@ -230,6 +239,105 @@ describe("analyzeFileForEtaCalls", () => {
     );
     analyzeFileForEtaCalls(sf, checker);
     expect(templateDataTypeMap.has("user")).toBe(true);
+  });
+
+  it("infers simple Eta config from new Eta({ ... }) for named templates", () => {
+    const { checker, sf } = makeTestProgram(
+      `declare class Eta {
+         constructor(config?: any);
+         render(t: string, d: any): string;
+       }
+       const eta = new Eta({
+         tags: ["{{", "}}"],
+         parse: { interpolate: ":", raw: "!" },
+         customTags: { "#": (content: string, data: unknown) => "" },
+         varName: "data",
+         useWith: true,
+         functionHeader: "const helper = data.name",
+         outputFunctionName: "print"
+       });
+       eta.render("profile", { name: "Ada" });`,
+    );
+
+    analyzeFileForEtaCalls(sf, checker);
+    const options = templateLanguageOptionsMap.get("profile");
+
+    expect(options?.tags).toEqual(["{{", "}}"]);
+    expect(options?.parse.interpolate).toBe(":");
+    expect(options?.parse.raw).toBe("!");
+    expect(options?.customTags).toEqual(["#"]);
+    expect(options?.varName).toBe("data");
+    expect(options?.useWith).toBe(true);
+    expect(options?.functionHeader).toBe("const helper = data.name");
+    expect(options?.outputFunctionName).toBe("print");
+  });
+
+  it("applies simple eta.configure({ ... }) calls before render analysis", () => {
+    const { checker, sf } = makeTestProgram(
+      `declare class Eta {
+         constructor(config?: any);
+         configure(config: any): void;
+         render(t: string, d: any): string;
+       }
+       const eta = new Eta({ tags: ["{{", "}}"] });
+       eta.configure({ varName: "data", outputFunctionName: "print" });
+       eta.render("card", { title: "Configured" });`,
+    );
+
+    analyzeFileForEtaCalls(sf, checker);
+    const options = templateLanguageOptionsMap.get("card");
+
+    expect(options?.tags).toEqual(["{{", "}}"]);
+    expect(options?.varName).toBe("data");
+    expect(options?.outputFunctionName).toBe("print");
+  });
+
+  it("propagates child render data to layout templates with body", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eta-layout-"));
+    const childPath = path.join(dir, "email-verify.eta");
+    const layoutPath = path.join(dir, "email-base.eta");
+    fs.writeFileSync(childPath, '<% layout("./email-base") %>');
+    fs.writeFileSync(layoutPath, "<%= it.title %><%~ it.body %>");
+
+    templateDataTypeMap.set(
+      "email-verify",
+      "{ title: string; ctaUrl: string }",
+    );
+    analyzeEtaTemplateLayouts([childPath, layoutPath]);
+
+    const type = templateDataTypeMap.get("email-base");
+    expect(type).toMatch(/title: string/);
+    expect(type).toMatch(/ctaUrl: string/);
+    expect(type).toMatch(/body: string/);
+  });
+
+  it("does not propagate dynamic layout names", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eta-layout-dynamic-"));
+    const childPath = path.join(dir, "page.eta");
+    fs.writeFileSync(childPath, '<% layout(layoutName) %>');
+
+    templateDataTypeMap.set("page", "{ title: string }");
+    analyzeEtaTemplateLayouts([childPath]);
+
+    expect(templateDataTypeMap.has("layoutName")).toBe(false);
+  });
+
+  it("merges multiple child render data shapes into one layout type", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eta-layout-merge-"));
+    const firstPath = path.join(dir, "first.eta");
+    const secondPath = path.join(dir, "second.eta");
+    fs.writeFileSync(firstPath, '<% layout("./base") %>');
+    fs.writeFileSync(secondPath, '<% layout("./base") %>');
+
+    templateDataTypeMap.set("first", "{ title: string }");
+    templateDataTypeMap.set("second", "{ count: number }");
+    analyzeEtaTemplateLayouts([firstPath, secondPath]);
+
+    const type = templateDataTypeMap.get("base");
+    expect(type).toContain("&");
+    expect(type).toMatch(/title: string/);
+    expect(type).toMatch(/count: number/);
+    expect(type).toMatch(/body: string/);
   });
 
   it("merges multiple call sites for the same template via intersection", () => {
@@ -332,7 +440,10 @@ describe("analyzeFileForEtaCalls", () => {
 // ── getItTypeForUri ────────────────────────────────────────────────────────────────
 
 describe("getItTypeForUri", () => {
-  beforeEach(() => templateDataTypeMap.clear());
+  beforeEach(() => {
+    templateDataTypeMap.clear();
+    templateLanguageOptionsMap.clear();
+  });
 
   it("returns DEFAULT_IT_TYPE when the template has no mapping", () => {
     expect(getItTypeForUri("file:///workspace/views/user.eta")).toBe(
@@ -363,7 +474,10 @@ describe("getItTypeForUri", () => {
 // ── Integration: real eta package type inference ──────────────────────────────
 
 describe("Integration: real eta package type inference", () => {
-  beforeEach(() => templateDataTypeMap.clear());
+  beforeEach(() => {
+    templateDataTypeMap.clear();
+    templateLanguageOptionsMap.clear();
+  });
 
   it("correctly infers greeting and dashboard types from demo/src/index.ts", () => {
     const demoIndexPath = fileURLToPath(
@@ -460,7 +574,10 @@ describe("Integration: real eta package type inference", () => {
 // ── scanWorkspaceFiles ────────────────────────────────────────────────────────
 
 describe("scanWorkspaceFiles", () => {
-  beforeEach(() => workspaceTsFiles.clear());
+  beforeEach(() => {
+    workspaceTsFiles.clear();
+    workspaceEtaFiles.clear();
+  });
 
   it("never includes files from any node_modules directory", () => {
     const root = fileURLToPath(new URL("..", import.meta.url));
@@ -490,7 +607,22 @@ describe("scanWorkspaceFiles", () => {
 // ── greeting vs dashboard regression ─────────────────────────────────────────
 
 describe("greeting vs dashboard type isolation", () => {
-  beforeEach(() => templateDataTypeMap.clear());
+  beforeEach(() => {
+    templateDataTypeMap.clear();
+    templateLanguageOptionsMap.clear();
+  });
+
+  it("includes Eta templates for layout analysis", () => {
+    const root = fileURLToPath(new URL("..", import.meta.url));
+    scanWorkspaceFiles(root);
+    const normalized = [...workspaceEtaFiles].map((f) =>
+      f.replaceAll("\\", "/"),
+    );
+
+    expect(
+      normalized.some((f) => f.endsWith("demo/views/greeting.eta")),
+    ).toBe(true);
+  });
 
   it("greeting gets heading+count, NOT title/stats", () => {
     const { checker, sf } = makeTestProgram(
@@ -588,7 +720,10 @@ describe("greeting vs dashboard type isolation", () => {
 // so that Eta templates receive precise IntelliSense.
 
 describe("complex type inference — unit tests via makeTestProgram", () => {
-  beforeEach(() => templateDataTypeMap.clear());
+  beforeEach(() => {
+    templateDataTypeMap.clear();
+    templateLanguageOptionsMap.clear();
+  });
 
   it("string[] tags are preserved as string[]", () => {
     const { checker, sf } = makeTestProgram(
@@ -728,6 +863,7 @@ describe("complex type inference — integration with real demo/src/index.ts", (
 
   beforeAll(() => {
     templateDataTypeMap.clear();
+    templateLanguageOptionsMap.clear();
     const demoIndexPath = fileURLToPath(
       new URL("../demo/src/index.ts", import.meta.url),
     );
@@ -839,6 +975,7 @@ describe("complex type inference — integration with real demo/src/index.ts", (
 describe("demo scenarios from Eta docs", () => {
   beforeAll(() => {
     templateDataTypeMap.clear();
+    templateLanguageOptionsMap.clear();
     const demoRoot = fileURLToPath(new URL("../demo", import.meta.url));
     const rootNames = ts.sys
       .readDirectory(

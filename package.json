@@ -1,5 +1,5 @@
 {
-  "name": "eta",
+  "name": "vscode-eta",
   "displayName": "Eta",
   "description": "Advanced syntax highlighting, intellisense, autocomplete, and diagnostics for Eta templating language",
   "version": "0.1.0",

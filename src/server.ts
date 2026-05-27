@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { buildVirtualContent, PREAMBLE_LINE_COUNT } from "./virtualDocument";
 import { isInsideEtaTagInText, positionToOffset } from "./position";
 import { tsKindToLSP } from "./lspKind";
+import { createServerLogger } from "./logging";
 import {
   analyzeWorkspaceFiles,
   getItTypeForUri,
@@ -56,6 +57,9 @@ export {
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
+const analysisLog = createServerLogger(connection.console, "analysis");
+const documentLog = createServerLogger(connection.console, "document");
+const virtualLog = createServerLogger(connection.console, "virtual");
 
 const virtualContents = new Map<string, string>(); // virtualPath -> content
 const uriToVirtualPath = new Map<string, string>(); // uri -> virtualPath
@@ -75,10 +79,6 @@ function getVirtualPath(uri: string): string {
   return vp;
 }
 
-function log(message: string): void {
-  connection.console?.log(message);
-}
-
 function ensureWorkspaceAnalyzed(): void {
   if (workspaceAnalyzed) return;
   workspaceAnalyzed = true;
@@ -90,29 +90,29 @@ function runWorkspaceAnalysis(): void {
   serviceVersion++;
 
   const rootNames = [...workspaceTsFiles];
-  log(`[eta] runWorkspaceAnalysis: ${rootNames.length} workspace files`);
+  analysisLog.info(`Scanning ${rootNames.length} workspace files`);
 
   if (rootNames.length > 0) {
     analyzeWorkspaceFiles(rootNames, {
       onError: (fileName, error) => {
-        log(`[eta] Error in ${path.basename(fileName)}: ${error}`);
+        analysisLog.error(`${path.basename(fileName)}: ${error}`);
       },
       onFailure: (error) => {
-        log(`[eta] Workspace analysis failed: ${error}`);
+        analysisLog.error(`Workspace analysis failed: ${error}`);
       },
       onMapping: (fileName, key, value) => {
-        log(
-          `[eta] ${path.basename(fileName)}: "${key}" -> ${value.substring(0, 100)}`,
+        analysisLog.debug(
+          `${path.basename(fileName)}: "${key}" -> ${value.substring(0, 100)}`,
         );
       },
     });
   }
 
-  log(
-    `[eta] analysis complete - map entries: [${[...templateDataTypeMap.keys()].join(", ")}]`,
+  analysisLog.info(
+    `Complete - map entries: [${[...templateDataTypeMap.keys()].join(", ")}]`,
   );
   for (const [k, v] of templateDataTypeMap) {
-    log(`[eta]   "${k}" -> ${v.substring(0, 120)}`);
+    analysisLog.debug(`"${k}" -> ${v.substring(0, 120)}`);
   }
 
   rebuildOpenVirtualFiles();
@@ -174,8 +174,8 @@ function updateVirtualFile(uri: string, etaSource: string): void {
     virtualContents.set(virtualPath, newContent);
     serviceVersion++;
     try {
-      log(
-        `[eta] virtual updated: ${path.basename(fileURLToPath(uri))} -> it: ${itType.substring(0, 120)}`,
+      virtualLog.debug(
+        `${path.basename(fileURLToPath(uri))} -> it: ${itType.substring(0, 120)}`,
       );
     } catch {
       // fileURLToPath may fail for non-file URIs
@@ -207,7 +207,9 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
 
 documents.onDidOpen((event) => {
   try {
-    log(`[eta] onDidOpen: ${path.basename(fileURLToPath(event.document.uri))}`);
+    documentLog.debug(
+      `Opened ${path.basename(fileURLToPath(event.document.uri))}`,
+    );
   } catch {
     // ignore
   }

@@ -6,9 +6,12 @@ import {
   ServerOptions,
   TransportKind,
 } from "vscode-languageclient/node";
+import { createExtensionLogger, type EtaLogger } from "./logging";
+import { findEtaTagRanges } from "./etaScanner";
 
 let client: LanguageClient;
-let log: vscode.OutputChannel;
+let log: vscode.LogOutputChannel;
+let logger: EtaLogger;
 
 // Define built-in Eta functions and helpers
 const ETA_BUILTINS: { [key: string]: any } = {
@@ -125,13 +128,6 @@ const TAG_TYPES: { [key: string]: any } = {
   },
 };
 
-interface EtaTagRange {
-  start: number;
-  end: number;
-  closed: boolean;
-  empty: boolean;
-}
-
 function positionToOffset(text: string, line: number, character: number): number {
   const lines = text.split("\n");
   let offset = 0;
@@ -139,119 +135,6 @@ function positionToOffset(text: string, line: number, character: number): number
     offset += (lines[i]?.length ?? 0) + 1;
   }
   return offset + character;
-}
-
-function consumeEtaTagOpener(source: string, start: number): number {
-  let i = start + 2;
-  if (source[i] === "-" || source[i] === "_") i++;
-  let prefix = i;
-  while (prefix < source.length && /[ \t]/.test(source[prefix])) prefix++;
-  if (prefix < source.length && "=~#*@".includes(source[prefix])) {
-    i = prefix + 1;
-  }
-  return i;
-}
-
-function consumeEtaTagContent(
-  source: string,
-  start: number,
-): { content: string; next: number; closed: boolean } {
-  let content = "";
-  let i = start;
-  let quote: '"' | "'" | "`" | undefined;
-  let lineComment = false;
-  let blockComment = false;
-
-  while (i < source.length) {
-    const ch = source[i];
-
-    if (lineComment) {
-      content += ch;
-      if (ch === "\n") lineComment = false;
-      i++;
-      continue;
-    }
-    if (blockComment) {
-      if (ch === "*" && source[i + 1] === "/") {
-        content += "*/";
-        i += 2;
-        blockComment = false;
-      } else {
-        content += ch;
-        i++;
-      }
-      continue;
-    }
-    if (quote) {
-      content += ch;
-      if (ch === "\\") {
-        if (i + 1 < source.length) content += source[i + 1];
-        i += 2;
-        continue;
-      }
-      if (ch === quote) quote = undefined;
-      i++;
-      continue;
-    }
-
-    if (ch === "/" && source[i + 1] === "/") {
-      content += "//";
-      i += 2;
-      lineComment = true;
-      continue;
-    }
-    if (ch === "/" && source[i + 1] === "*") {
-      content += "/*";
-      i += 2;
-      blockComment = true;
-      continue;
-    }
-    if (ch === '"' || ch === "'" || ch === "`") {
-      quote = ch;
-      content += ch;
-      i++;
-      continue;
-    }
-
-    if (ch === "%" && source[i + 1] === ">") {
-      return { content, next: i + 2, closed: true };
-    }
-    if (
-      (ch === "-" || ch === "_") &&
-      source[i + 1] === "%" &&
-      source[i + 2] === ">"
-    ) {
-      return { content, next: i + 3, closed: true };
-    }
-
-    content += ch;
-    i++;
-  }
-
-  return { content, next: i, closed: false };
-}
-
-function findEtaTagRanges(text: string): EtaTagRange[] {
-  const ranges: EtaTagRange[] = [];
-  let i = 0;
-  while (i < text.length) {
-    if (text[i] !== "<" || text[i + 1] !== "%") {
-      i++;
-      continue;
-    }
-
-    const start = i;
-    const contentStart = consumeEtaTagOpener(text, i);
-    const tag = consumeEtaTagContent(text, contentStart);
-    ranges.push({
-      start,
-      end: tag.next,
-      closed: tag.closed,
-      empty: tag.content.trim().length === 0,
-    });
-    i = Math.max(tag.next, start + 2);
-  }
-  return ranges;
 }
 
 function isInsideEtaTag(
@@ -490,8 +373,8 @@ class EtaDiagnosticsProvider {
 
     this.diagnosticCollection.set(document.uri, diagnostics);
     if (diagnostics.length > 0) {
-      log?.appendLine(
-        `[Eta] ${path.basename(document.fileName)}: ${diagnostics.length} diagnostic(s) — ` +
+      logger?.warn(
+        `${path.basename(document.fileName)}: ${diagnostics.length} diagnostic(s) - ` +
           diagnostics.map((d) => d.message).join(" | "),
       );
     }
@@ -503,9 +386,10 @@ class EtaDiagnosticsProvider {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  log = vscode.window.createOutputChannel("Eta");
+  log = vscode.window.createOutputChannel("Eta", { log: true });
+  logger = createExtensionLogger(log);
   context.subscriptions.push(log);
-  log.appendLine("[Eta] Extension activated");
+  logger.info("Extension activated");
 
   // Register completion provider
   const completionProvider = new EtaCompletionProvider();
@@ -524,7 +408,7 @@ export function activate(context: vscode.ExtensionContext): void {
     diagnosticsProvider,
     vscode.workspace.onDidOpenTextDocument((document: vscode.TextDocument) => {
       if (document.languageId === "eta") {
-        log.appendLine(`[Eta] Opened: ${document.fileName}`);
+        logger.debug(`Opened ${document.fileName}`);
         diagnosticsProvider.provideDiagnostics(document);
       }
     }),
@@ -540,8 +424,8 @@ export function activate(context: vscode.ExtensionContext): void {
   // Provide diagnostics for currently open documents
   for (const editor of vscode.window.visibleTextEditors) {
     if (editor.document.languageId === "eta") {
-      log.appendLine(
-        `[Eta] Providing initial diagnostics for ${editor.document.fileName}`,
+      logger.debug(
+        `Providing initial diagnostics for ${editor.document.fileName}`,
       );
       diagnosticsProvider.provideDiagnostics(editor.document);
     }
@@ -568,19 +452,19 @@ export function activate(context: vscode.ExtensionContext): void {
     serverOptions,
     clientOptions,
   );
-  log.appendLine(`[Eta] Starting language server: ${serverModule}`);
+  logger.info(`Starting language server: ${serverModule}`);
   client
     .start()
     .then(() => {
-      log.appendLine("[Eta] Language server started");
+      logger.info("Language server started");
     })
     .catch((err: unknown) => {
-      log.appendLine(`[Eta] Language server failed to start: ${err}`);
+      logger.error(`Language server failed to start: ${err}`);
     });
 }
 
 export function deactivate(): Thenable<void> | undefined {
-  log?.appendLine("[Eta] Extension deactivated");
+  logger?.info("Extension deactivated");
   if (!client) return undefined;
   return client.stop();
 }

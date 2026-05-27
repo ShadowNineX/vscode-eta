@@ -34,6 +34,7 @@
   "devDependencies": {
     "@types/node": "^25.8.0",
     "@types/vscode": "^1.120.0",
+    "@vitest/coverage-v8": "4.1.6",
     "@vitest/ui": "^4.1.6",
     "eta": "^4.6.0",
     "tsup": "^8.5.1",

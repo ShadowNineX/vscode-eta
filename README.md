@@ -5,6 +5,7 @@
 ### Rich language support for fast, typed, delightful `.eta` templates.
 
 [![Build VSIX](https://img.shields.io/github/actions/workflow/status/ShadowNineX/vscode-eta/build-vsix.yml?branch=main&label=build%20vsix&style=for-the-badge)](https://github.com/ShadowNineX/vscode-eta/actions/workflows/build-vsix.yml)
+[![Coverage](https://img.shields.io/codecov/c/github/ShadowNineX/vscode-eta?style=for-the-badge&logo=codecov&logoColor=white)](https://codecov.io/gh/ShadowNineX/vscode-eta)
 [![Version](https://img.shields.io/github/package-json/v/ShadowNineX/vscode-eta?style=for-the-badge&color=7c3aed)](package.json)
 [![License](https://img.shields.io/github/license/ShadowNineX/vscode-eta?style=for-the-badge&color=22c55e)](LICENSE)
 [![Bun](https://img.shields.io/badge/bun-powered-000000?style=for-the-badge&logo=bun&logoColor=white)](https://bun.sh/)

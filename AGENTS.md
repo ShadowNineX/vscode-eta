@@ -9,7 +9,12 @@ This is a VS Code extension that provides language support for Eta templates (`.
 The extension has two main runtime pieces:
 
 - `src/extension.ts` is the VS Code extension host entry point. It registers completion, hover, diagnostics, and starts the language client.
-- `src/server.ts` is the language server. It builds virtual TypeScript files from Eta templates, preserves source offsets inside `<% ... %>` tags, analyzes workspace render calls to infer the `it` data type, and serves completions/hovers.
+- `src/server.ts` is the language-server entry point. It owns LSP wiring, open-document state, virtual file cache, and TypeScript language-service lifecycle.
+- `src/etaScanner.ts` parses Eta tag ranges and tag content, including multi-line tags and delimiter-like text inside strings/comments.
+- `src/virtualDocument.ts` builds the virtual TypeScript content used for completions/hovers and owns the fixed preamble.
+- `src/typeInference.ts` scans TS/JS workspace files for Eta render calls and infers structural `it` types.
+- `src/position.ts` contains offset and tag-containment helpers.
+- `src/lspKind.ts` maps TypeScript completion kinds to LSP completion kinds.
 
 Other important assets:
 
@@ -47,7 +52,7 @@ Notes:
 - Prefer focused changes that match the existing style: double quotes, semicolons, explicit exported helpers where tests need direct coverage.
 - When changing Eta tag parsing, be careful with character and line offsets. The language server intentionally pads non-TypeScript template text with spaces so TypeScript diagnostics/completions map back to the original Eta source.
 - Keep `PREAMBLE_LINE_COUNT` accurate if the virtual TypeScript preamble changes. Tests depend on the fixed line offset.
-- Avoid widening type-inference behavior casually. `src/server.ts` deliberately expands render-call data into self-contained structural `it` types and prevents type bleed between templates.
+- Avoid widening type-inference behavior casually. `src/typeInference.ts` deliberately expands render-call data into self-contained structural `it` types and prevents type bleed between templates.
 
 ## Testing Guidance
 
@@ -59,10 +64,15 @@ Run the most relevant tests after changes:
 
 Important test files:
 
-- `src/server.test.ts` covers virtual Eta-to-TypeScript content, `it` type inference, workspace scanning, completion kind mapping, and demo integration.
-- `src/providers.test.ts` covers provider-style parsing and diagnostic logic.
-- `src/templates.test.ts` validates fixture templates and common Eta patterns.
-- `src/extension.test.ts` uses mocked VS Code APIs for extension-host behavior.
+- `tests/etaScanner.test.ts` covers Eta tag opener/content parsing and tag-range detection.
+- `tests/virtualDocument.test.ts` covers virtual Eta-to-TypeScript content and preamble behavior.
+- `tests/position.test.ts` covers offset conversion and cursor-in-tag detection.
+- `tests/lspKind.test.ts` covers TypeScript completion-kind to LSP-kind mapping.
+- `tests/typeInference.test.ts` covers `it` type inference, workspace scanning, and demo integration.
+- `tests/server.test.ts` smoke-tests the language-server entrypoint wiring.
+- `tests/providers.test.ts` covers provider-style parsing and diagnostic logic.
+- `tests/templates.test.ts` validates fixture templates and common Eta patterns.
+- `tests/extension.test.ts` uses mocked VS Code APIs for extension-host behavior.
 
 When adding a new Eta language feature, add or update fixture coverage in `templates/` when useful, and update tests near the behavior being changed.
 

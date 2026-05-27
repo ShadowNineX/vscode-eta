@@ -1,0 +1,4 @@
+<li class="status-row status-row--<%= it.item.status %>">
+  <span><%= it.item.label %></span>
+  <strong><%= it.item.value %></strong>
+</li>

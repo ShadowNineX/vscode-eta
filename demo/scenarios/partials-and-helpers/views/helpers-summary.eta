@@ -1,0 +1,20 @@
+<section>
+  <% const heading = capture(() => { %>
+    <h1><%= it.title %></h1>
+    <time><%= it.generatedAt %></time>
+  <% }) %>
+
+  <%~ heading %>
+
+  <ul>
+    <% for (const item of it.items) {
+      output(include("./helper-row", { item }))
+    } %>
+  </ul>
+
+  <% if (it.featured) { %>
+    <footer>
+      <%~ include("./helper-badge", { status: it.featured.status, label: it.featured.label }) %>
+    </footer>
+  <% } %>
+</section>

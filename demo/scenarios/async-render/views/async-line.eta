@@ -1,0 +1,4 @@
+<li data-trend="<%= it.row.trend %>">
+  <span><%= it.row.label %></span>
+  <strong><%= it.row.value %></strong>
+</li>

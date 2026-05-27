@@ -1,0 +1,16 @@
+<article>
+  <h1>Invoice <%= it.id %></h1>
+  <p><%= it.customer.name %> &lt;<%= it.customer.email %>&gt;</p>
+
+  <ul>
+    <% for (const item of it.lineItems) { %>
+      <li><%= item.description %>: <%= item.amount %></li>
+    <% } %>
+  </ul>
+
+  <% if (it.paid) { %>
+    <strong>Paid</strong>
+  <% } else { %>
+    <strong>Open</strong>
+  <% } %>
+</article>

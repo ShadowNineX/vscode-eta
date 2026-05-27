@@ -1,0 +1,1 @@
+<span class="badge badge--<%= it.status %>"><%= it.label %></span>

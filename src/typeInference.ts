@@ -27,13 +27,15 @@ export function scanWorkspaceFiles(root: string): void {
   }
 }
 
-const ETA_RENDER_METHODS = new Set([
+// Methods whose first string argument names a file/cache template that can map
+// back to a `.eta` document. `renderString*` is intentionally excluded: Eta
+// uses those methods for inline template source, not template filenames.
+// `renderFile*` is retained for legacy Eta v2 projects.
+const ETA_NAMED_TEMPLATE_RENDER_METHODS = new Set([
   "render",
   "renderFile",
-  "renderString",
   "renderAsync",
   "renderFileAsync",
-  "renderStringAsync",
 ]);
 
 /** Maximum recursion depth when expanding object types to avoid infinite loops. */
@@ -188,7 +190,7 @@ export function analyzeFileForEtaCalls(
   function visit(node: ts.Node): void {
     if (ts.isCallExpression(node)) {
       const methodName = getCalledMethodName(node.expression);
-      if (methodName && ETA_RENDER_METHODS.has(methodName)) {
+      if (methodName && ETA_NAMED_TEMPLATE_RENDER_METHODS.has(methodName)) {
         const args = node.arguments;
         if (args.length >= 2 && ts.isStringLiteral(args[0])) {
           recordRenderCallType(args[0].text, args[1], checker);

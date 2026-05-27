@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title><%= it.title %></title>
+    <%~ block("head") %>
+  </head>
+  <body>
+    <nav>
+      <% for (const item of it.navItems) { %>
+        <a href="<%= item.href %>" aria-current="<%= item.active ? "page" : "false" %>">
+          <%= item.label %>
+        </a>
+      <% } %>
+    </nav>
+    <aside><%~ block("sidebar", () => { %>No sidebar<% }) %></aside>
+    <main><%~ it.body %></main>
+    <%~ block("scripts", () => { %>
+      <script src="/assets/default.js"></script>
+    <% }) %>
+  </body>
+</html>

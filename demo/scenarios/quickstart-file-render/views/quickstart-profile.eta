@@ -1,0 +1,21 @@
+<section class="profile">
+  <h1>Hi <%= it.name %>!</h1>
+
+  <% if (it.unreadCount > 0) { %>
+    <p>You have <%= it.unreadCount %> unread messages.</p>
+  <% } else { %>
+    <p>You are all caught up.</p>
+  <% } %>
+
+  <ul>
+    <% for (const role of it.roles) { %>
+      <li><%= role %></li>
+    <% } %>
+  </ul>
+
+  <div class="bio"><%~ it.htmlBio %></div>
+
+  <% if (it.lastLogin) { %>
+    <small>Last login: <%= it.lastLogin %></small>
+  <% } %>
+</section>

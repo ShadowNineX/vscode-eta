@@ -1,0 +1,17 @@
+<article>
+  <h1><%= it.title %></h1>
+  <div><%~ it.html %></div>
+
+  <dl>
+    <dt>Owner</dt>
+    <dd><%= it.owner.name %> &lt;<%= it.owner.email %>&gt;</dd>
+    <dt>Score</dt>
+    <dd><%= it.score %></dd>
+  </dl>
+
+  <p>
+    <% for (const tag of it.tags) { %>
+      <span>#<%= tag %></span>
+    <% } %>
+  </p>
+</article>

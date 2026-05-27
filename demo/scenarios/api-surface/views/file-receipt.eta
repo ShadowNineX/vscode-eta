@@ -1,0 +1,5 @@
+<article>
+  <h1>Receipt <%= it.receiptId %></h1>
+  <p>Total: <%= it.total %></p>
+  <time><%= it.issuedAt %></time>
+</article>

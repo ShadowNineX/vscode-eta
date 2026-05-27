@@ -1,0 +1,25 @@
+<% layout("./layout-shell", { title: it.title, navItems: it.navItems }) %>
+
+<% block("head", () => { %>
+  <meta name="description" content="<%= it.content %>">
+<% }) %>
+
+<% block("sidebar", () => { %>
+  <dl>
+    <dt>Visits</dt>
+    <dd><%= it.metrics.visits %></dd>
+    <dt>Conversion</dt>
+    <dd><%= it.metrics.conversionRate %></dd>
+  </dl>
+<% }) %>
+
+<% block("scripts", () => { %>
+  <% for (const script of it.scripts) { %>
+    <script src="<%= script %>"></script>
+  <% } %>
+<% }) %>
+
+<article>
+  <h1><%= it.title %></h1>
+  <p><%= it.content %></p>
+</article>

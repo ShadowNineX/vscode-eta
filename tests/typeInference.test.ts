@@ -201,14 +201,26 @@ describe("analyzeFileForEtaCalls", () => {
     expect(result).toMatch(/age: number/);
   });
 
-  it("detects renderString() call", () => {
+  it("ignores renderString() because it renders inline template source", () => {
     const { checker, sf } = makeTestProgram(
       `declare function renderString(t: string, d: any): string;\n` +
-        `renderString("greeting", { message: "hello" });`,
+        `renderString("Hi <%= it.message %>", { message: "hello" });`,
     );
     analyzeFileForEtaCalls(sf, checker);
-    const result = templateDataTypeMap.get("greeting");
-    expect(result).toMatch(/message: string/);
+    expect(templateDataTypeMap.size).toBe(0);
+  });
+
+  it("detects legacy renderFile() and renderFileAsync() calls", () => {
+    const { checker, sf } = makeTestProgram(
+      `declare function renderFile(t: string, d: any): string;\n` +
+        `declare function renderFileAsync(t: string, d: any): Promise<string>;\n` +
+        `renderFile("views/invoice.eta", { id: "INV-1", total: 42 });\n` +
+        `renderFileAsync("views/receipt.eta", { receiptId: "R-1", paid: true });`,
+    );
+    analyzeFileForEtaCalls(sf, checker);
+
+    expect(templateDataTypeMap.get("invoice")).toMatch(/total: number/);
+    expect(templateDataTypeMap.get("receipt")).toMatch(/paid: boolean/);
   });
 
   it("strips .eta extension from template path for the key", () => {
@@ -821,5 +833,138 @@ describe("complex type inference — integration with real demo/src/index.ts", (
     const type = templateDataTypeMap.get("cart");
     expect(type).not.toContain("slug");
     expect(type).not.toContain("dismissible");
+  });
+});
+
+describe("demo scenarios from Eta docs", () => {
+  beforeAll(() => {
+    templateDataTypeMap.clear();
+    const demoRoot = fileURLToPath(new URL("../demo", import.meta.url));
+    const rootNames = ts.sys
+      .readDirectory(
+        demoRoot,
+        [".ts", ".tsx", ".js", ".jsx"],
+        ["node_modules", ".git", "out", "dist", "build"],
+      )
+      .filter((fileName) => !fileName.includes("node_modules"));
+
+    const program = ts.createProgram({
+      rootNames,
+      options: {
+        allowJs: true,
+        checkJs: false,
+        target: ts.ScriptTarget.ES2022,
+        module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler,
+        noEmit: true,
+        skipLibCheck: true,
+      },
+    });
+    const checker = program.getTypeChecker();
+
+    for (const rootName of rootNames) {
+      const sf =
+        program.getSourceFile(rootName) ??
+        program.getSourceFile(rootName.replaceAll("\\", "/"));
+      if (sf) analyzeFileForEtaCalls(sf, checker);
+    }
+  });
+
+  it("maps each focused scenario template basename", () => {
+    const keys = [...templateDataTypeMap.keys()];
+    expect(keys).toContain("quickstart-profile");
+    expect(keys).toContain("layout-page");
+    expect(keys).toContain("layout-shell");
+    expect(keys).toContain("helpers-summary");
+    expect(keys).toContain("helper-row");
+    expect(keys).toContain("helper-badge");
+    expect(keys).toContain("async-report");
+    expect(keys).toContain("async-line");
+    expect(keys).toContain("configured-card");
+    expect(keys).toContain("file-invoice");
+    expect(keys).toContain("file-receipt");
+    expect(keys).toContain("@programmatic-snippet");
+    expect(keys).toContain("syntax-gallery");
+    expect(keys).not.toContain("Hi <%= it");
+  });
+
+  it("quickstart-file-render infers scalar, optional, array, and literal-union fields", () => {
+    const type = templateDataTypeMap.get("quickstart-profile");
+    expect(type).toMatch(/name: string/);
+    expect(type).toMatch(/unreadCount: number/);
+    expect(type).toMatch(/roles:/);
+    expect(type).toMatch(/"admin"/);
+    expect(type).toMatch(/"editor"/);
+    expect(type).toMatch(/htmlBio: string/);
+    expect(type).toMatch(/lastLogin/);
+  });
+
+  it("layouts-and-blocks keeps page and layout data separate", () => {
+    const pageType = templateDataTypeMap.get("layout-page");
+    const shellType = templateDataTypeMap.get("layout-shell");
+
+    expect(pageType).toMatch(/content: string/);
+    expect(pageType).toMatch(/conversionRate: number/);
+    expect(pageType).toMatch(/scripts: string\[\]/);
+    expect(shellType).toMatch(/body: string/);
+    expect(shellType).toMatch(/navItems:/);
+    expect(shellType).not.toContain("conversionRate");
+  });
+
+  it("partials-and-helpers infers includes and helper partial data", () => {
+    const summaryType = templateDataTypeMap.get("helpers-summary");
+    const rowType = templateDataTypeMap.get("helper-row");
+    const badgeType = templateDataTypeMap.get("helper-badge");
+
+    expect(summaryType).toMatch(/generatedAt: string/);
+    expect(summaryType).toMatch(/items:/);
+    expect(summaryType).toMatch(/featured/);
+    expect(rowType).toMatch(/item:/);
+    expect(rowType).toMatch(/value: number/);
+    expect(badgeType).toMatch(/status: "ok"/);
+    expect(badgeType).toMatch(/label: string/);
+  });
+
+  it("async-render infers async page and async partial data", () => {
+    const reportType = templateDataTypeMap.get("async-report");
+    const lineType = templateDataTypeMap.get("async-line");
+
+    expect(reportType).toMatch(/generatedBy: string/);
+    expect(reportType).toMatch(/rows:/);
+    expect(reportType).toMatch(/fetchSummary/);
+    expect(lineType).toMatch(/row:/);
+    expect(lineType).toMatch(/trend:/);
+  });
+
+  it("config-options stays compatible with default Eta tags", () => {
+    const type = templateDataTypeMap.get("configured-card");
+    expect(type).toMatch(/title: string/);
+    expect(type).toMatch(/html: string/);
+    expect(type).toMatch(/tags: string\[\]/);
+    expect(type).toMatch(/owner:/);
+    expect(type).toMatch(/score: number/);
+  });
+
+  it("api-surface covers named file templates and programmatic named templates", () => {
+    const invoiceType = templateDataTypeMap.get("file-invoice");
+    const receiptType = templateDataTypeMap.get("file-receipt");
+    const programmaticType = templateDataTypeMap.get("@programmatic-snippet");
+
+    expect(invoiceType).toMatch(/id: string/);
+    expect(invoiceType).toMatch(/lineItems:/);
+    expect(invoiceType).toMatch(/paid: boolean/);
+    expect(receiptType).toMatch(/receiptId: string/);
+    expect(receiptType).toMatch(/issuedAt: string/);
+    expect(programmaticType).toMatch(/title: string/);
+    expect(programmaticType).toMatch(/count: number/);
+  });
+
+  it("syntax-edge-cases covers object loops, debug flags, and delimiter samples", () => {
+    const type = templateDataTypeMap.get("syntax-gallery");
+    expect(type).toMatch(/title: string/);
+    expect(type).toMatch(/users:/);
+    expect(type).toMatch(/countsByStatus:/);
+    expect(type).toMatch(/debug: boolean/);
+    expect(type).toMatch(/delimiterSamples:/);
   });
 });

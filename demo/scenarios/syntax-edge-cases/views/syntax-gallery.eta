@@ -1,0 +1,30 @@
+<section>
+  <h1><%= it.title %></h1>
+
+  <% if (it.debug) { %>
+    <% console.log("Rendering " + it.title) %>
+  <% } %>
+
+  <h2>Users</h2>
+  <ul>
+    <% it.users.forEach(function(user) { %>
+      <li><%= user.first %> <%= user.last %></li>
+    <% }) %>
+  </ul>
+
+  <h2>Status Counts</h2>
+  <dl>
+    <% Object.keys(it.countsByStatus).forEach(function(status) { %>
+      <dt><%= status %></dt>
+      <dd><%= it.countsByStatus[status] %></dd>
+    <% }) %>
+  </dl>
+
+  <% /* Strings and comments can contain delimiters like <% and %> safely. */ %>
+  <p><%= it.delimiterSamples.openTag %> ... <%= it.delimiterSamples.closeTag %></p>
+  <p><%= "%>" %></p>
+
+  <%- if (it.users.length > 0) { -%>
+    <p>Whitespace-trimmed block</p>
+  <%- } -%>
+</section>

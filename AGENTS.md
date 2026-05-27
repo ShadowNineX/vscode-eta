@@ -1,0 +1,88 @@
+# AGENTS.md
+
+Guidance for coding agents working in this repository.
+
+## Project Overview
+
+This is a VS Code extension that provides language support for Eta templates (`.eta`): syntax highlighting, snippets, completions, hover help, diagnostics, and LSP-powered TypeScript IntelliSense inside Eta tags.
+
+The extension has two main runtime pieces:
+
+- `src/extension.ts` is the VS Code extension host entry point. It registers completion, hover, diagnostics, and starts the language client.
+- `src/server.ts` is the language server. It builds virtual TypeScript files from Eta templates, preserves source offsets inside `<% ... %>` tags, analyzes workspace render calls to infer the `it` data type, and serves completions/hovers.
+
+Other important assets:
+
+- `syntaxes/eta.tmLanguage.json` defines TextMate grammar highlighting.
+- `snippets/eta.json` defines Eta snippets contributed by the extension.
+- `language-configuration.json` defines brackets, comments, auto-closing pairs, folding, and word patterns.
+- `templates/` contains Eta fixture templates used by tests.
+- `demo/` is a sample workspace used to exercise type inference from real Eta render calls.
+- `out/` is generated compiler output and should not be edited directly.
+
+## Commands
+
+Use Bun from the repository root:
+
+```sh
+bun run compile
+bun test
+bun run test:coverage
+bun run test:ui
+```
+
+Notes:
+
+- `bun test` runs the package `test` script, which uses `vitest run`.
+- `bun run compile` runs `tsc -p ./` and emits to `out/`.
+- Tests run in the Node environment via `vitest.config.ts`.
+- The lockfile is `bun.lock`. Use Bun for installs, script execution, and lockfile updates unless explicitly asked otherwise.
+
+## Development Rules
+
+- Keep source edits in `src/`, syntax edits in `syntaxes/`, snippets in `snippets/`, fixtures in `templates/`, and demo-only examples in `demo/`.
+- Do not hand-edit `out/`; regenerate it with `bun run compile`.
+- Do not commit or rely on `node_modules/`, coverage output, `.vitest/`, `.vsix`, `dist/`, or other ignored generated artifacts.
+- Preserve strict TypeScript compatibility. `tsconfig.json` uses `strict: true`, CommonJS modules, ES2020 target, declarations, and source maps.
+- Prefer focused changes that match the existing style: double quotes, semicolons, explicit exported helpers where tests need direct coverage.
+- When changing Eta tag parsing, be careful with character and line offsets. The language server intentionally pads non-TypeScript template text with spaces so TypeScript diagnostics/completions map back to the original Eta source.
+- Keep `PREAMBLE_LINE_COUNT` accurate if the virtual TypeScript preamble changes. Tests depend on the fixed line offset.
+- Avoid widening type-inference behavior casually. `src/server.ts` deliberately expands render-call data into self-contained structural `it` types and prevents type bleed between templates.
+
+## Testing Guidance
+
+Run the most relevant tests after changes:
+
+- Parser, virtual-file, type-inference, LSP completion/hover changes: `bun test`.
+- Snippet, grammar, or template fixture changes: `bun test`, and consider manual VS Code extension testing.
+- Compile-only/package-surface changes: `bun run compile`.
+
+Important test files:
+
+- `src/server.test.ts` covers virtual Eta-to-TypeScript content, `it` type inference, workspace scanning, completion kind mapping, and demo integration.
+- `src/providers.test.ts` covers provider-style parsing and diagnostic logic.
+- `src/templates.test.ts` validates fixture templates and common Eta patterns.
+- `src/extension.test.ts` uses mocked VS Code APIs for extension-host behavior.
+
+When adding a new Eta language feature, add or update fixture coverage in `templates/` when useful, and update tests near the behavior being changed.
+
+## VS Code Extension Packaging
+
+`package.json` contributes:
+
+- Language id `eta` for `.eta` files.
+- Grammar at `syntaxes/eta.tmLanguage.json`.
+- Snippets at `snippets/eta.json`.
+- Extension main file `./out/extension.js`.
+
+`.vscodeignore` excludes TypeScript sources and includes compiled `out/`, so compile before packaging or prepublish.
+
+## Manual QA
+
+For interactive testing, open the repository or `demo/` in VS Code after compiling. Useful checks:
+
+- `.eta` files highlight correctly.
+- Typing inside `<% ... %>` offers Eta built-ins and TypeScript completions.
+- Hover over helpers such as `layout`, `include`, `block`, `capture`, `output`, and `it`.
+- Broken fixture-like templates show diagnostics for empty, unclosed, or mismatched tags.
+- Demo templates infer distinct `it` types without leaking fields between templates.

@@ -26,14 +26,14 @@ Use Bun from the repository root:
 
 ```sh
 bun run compile
-bun test
+bun run test
 bun run test:coverage
 bun run test:ui
 ```
 
 Notes:
 
-- `bun test` runs the package `test` script, which uses `vitest run`.
+- `bun run test` runs the package `test` script, which uses `vitest run`.
 - `bun run compile` runs `tsc -p ./` and emits to `out/`.
 - Tests run in the Node environment via `vitest.config.ts`.
 - The lockfile is `bun.lock`. Use Bun for installs, script execution, and lockfile updates unless explicitly asked otherwise.
@@ -53,8 +53,8 @@ Notes:
 
 Run the most relevant tests after changes:
 
-- Parser, virtual-file, type-inference, LSP completion/hover changes: `bun test`.
-- Snippet, grammar, or template fixture changes: `bun test`, and consider manual VS Code extension testing.
+- Parser, virtual-file, type-inference, LSP completion/hover changes: `bun run test`.
+- Snippet, grammar, or template fixture changes: `bun run test`, and consider manual VS Code extension testing.
 - Compile-only/package-surface changes: `bun run compile`.
 
 Important test files:

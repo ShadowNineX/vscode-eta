@@ -1,8 +1,8 @@
 <div align="center">
 
-# ⚡ Eta for VS Code
+# ⚡ Eta IntelliSense
 
-### Rich language support for fast, typed, delightful `.eta` templates.
+### Typed editor tooling for fast, delightful `.eta` templates in VS Code.
 
 [![Build VSIX](https://img.shields.io/github/actions/workflow/status/ShadowNineX/vscode-eta/build-vsix.yml?branch=main&label=build%20vsix&style=for-the-badge)](https://github.com/ShadowNineX/vscode-eta/actions/workflows/build-vsix.yml)
 [![Coverage](https://img.shields.io/codecov/c/github/ShadowNineX/vscode-eta?style=for-the-badge&logo=codecov&logoColor=white)](https://codecov.io/gh/ShadowNineX/vscode-eta)
@@ -11,7 +11,7 @@
 [![Bun](https://img.shields.io/badge/bun-powered-000000?style=for-the-badge&logo=bun&logoColor=white)](https://bun.sh/)
 [![Eta](https://img.shields.io/badge/eta-v4-ff477e?style=for-the-badge)](https://eta.js.org/)
 
-`Eta` brings syntax highlighting, snippets, diagnostics, hover docs, completions, and TypeScript-powered IntelliSense to VS Code templates.
+`Eta IntelliSense` brings syntax highlighting, snippets, diagnostics, hover docs, completions, and TypeScript-powered IntelliSense to VS Code templates.
 
 </div>
 

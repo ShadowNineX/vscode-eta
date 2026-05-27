@@ -2,7 +2,7 @@
   "name": "eta-language-support",
   "displayName": "Eta IntelliSense",
   "description": "Typed IntelliSense, syntax highlighting, autocomplete, and diagnostics for Eta templates",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "ShadowNine",
   "license": "MIT",
   "repository": {

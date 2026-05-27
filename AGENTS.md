@@ -87,6 +87,13 @@ When adding a new Eta language feature, add or update fixture coverage in `templ
 
 `.vscodeignore` excludes TypeScript sources and includes compiled `out/`, so compile before packaging or prepublish.
 
+## Versioning and Changelog
+
+- When changing the `version` field in `package.json`, update `CHANGELOG.md` in the same change.
+- Add the new changelog entry above older versions and summarize user-visible fixes, features, packaging changes, and important developer workflow changes.
+- Use recent git history to describe what changed since the previous version instead of guessing.
+- Keep version notes concise and avoid listing unrelated internal churn.
+
 ## Manual QA
 
 For interactive testing, open the repository or `demo/` in VS Code after compiling. Useful checks:

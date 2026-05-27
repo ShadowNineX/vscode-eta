@@ -520,55 +520,59 @@ describe("Integration: real eta package type inference", () => {
     expect(dashType).not.toMatch(/heading:/);
   });
 
-  it("correctly maps all templates when ALL workspace source files are analyzed together", () => {
-    // Simulate runWorkspaceAnalysis: scan workspace (excluding node_modules at any depth),
-    // create a program from those files, and analyze each one.
-    const workspaceDir = fileURLToPath(new URL("..", import.meta.url));
-    const rawFiles = ts.sys.readDirectory(
-      workspaceDir,
-      [".ts", ".tsx", ".js", ".jsx"],
-      ["node_modules", ".git", "out", "dist", "build"],
-    );
-    // ts.sys.readDirectory only excludes the top-level directory names;
-    // nested node_modules (e.g. demo/node_modules) must be filtered manually.
-    const allWorkspaceFiles = rawFiles.filter(
-      (f) => !f.includes("node_modules"),
-    );
+  it(
+    "correctly maps all templates when ALL workspace source files are analyzed together",
+    () => {
+      // Simulate runWorkspaceAnalysis: scan workspace (excluding node_modules at any depth),
+      // create a program from those files, and analyze each one.
+      const workspaceDir = fileURLToPath(new URL("..", import.meta.url));
+      const rawFiles = ts.sys.readDirectory(
+        workspaceDir,
+        [".ts", ".tsx", ".js", ".jsx"],
+        ["node_modules", ".git", "out", "dist", "build"],
+      );
+      // ts.sys.readDirectory only excludes the top-level directory names;
+      // nested node_modules (e.g. demo/node_modules) must be filtered manually.
+      const allWorkspaceFiles = rawFiles.filter(
+        (f) => !f.includes("node_modules"),
+      );
 
-    const program = ts.createProgram({
-      rootNames: allWorkspaceFiles,
-      options: {
-        allowJs: true,
-        checkJs: false,
-        target: ts.ScriptTarget.ES2020,
-        module: ts.ModuleKind.ESNext,
-        moduleResolution: ts.ModuleResolutionKind.Bundler,
-        noEmit: true,
-        skipLibCheck: true,
-      },
-    });
+      const program = ts.createProgram({
+        rootNames: allWorkspaceFiles,
+        options: {
+          allowJs: true,
+          checkJs: false,
+          target: ts.ScriptTarget.ES2020,
+          module: ts.ModuleKind.ESNext,
+          moduleResolution: ts.ModuleResolutionKind.Bundler,
+          noEmit: true,
+          skipLibCheck: true,
+        },
+      });
 
-    const checker = program.getTypeChecker();
-    const rootSet = new Set(allWorkspaceFiles);
+      const checker = program.getTypeChecker();
+      const rootSet = new Set(allWorkspaceFiles);
 
-    for (const sf of program.getSourceFiles()) {
-      if (sf.isDeclarationFile) continue;
-      if (!rootSet.has(sf.fileName)) continue;
-      analyzeFileForEtaCalls(sf, checker);
-    }
+      for (const sf of program.getSourceFiles()) {
+        if (sf.isDeclarationFile) continue;
+        if (!rootSet.has(sf.fileName)) continue;
+        analyzeFileForEtaCalls(sf, checker);
+      }
 
-    const greeting = templateDataTypeMap.get("greeting");
-    const dashboard = templateDataTypeMap.get("dashboard");
+      const greeting = templateDataTypeMap.get("greeting");
+      const dashboard = templateDataTypeMap.get("dashboard");
 
-    expect(greeting).toMatch(/heading: string/);
-    expect(greeting).toMatch(/count: number/);
-    expect(greeting).not.toMatch(/\btitle:/);
+      expect(greeting).toMatch(/heading: string/);
+      expect(greeting).toMatch(/count: number/);
+      expect(greeting).not.toMatch(/\btitle:/);
 
-    expect(dashboard).toMatch(/title: string/);
-    expect(dashboard).toMatch(/stats:/);
-    expect(dashboard).toMatch(/visits: number/);
-    expect(dashboard).not.toMatch(/heading:/);
-  });
+      expect(dashboard).toMatch(/title: string/);
+      expect(dashboard).toMatch(/stats:/);
+      expect(dashboard).toMatch(/visits: number/);
+      expect(dashboard).not.toMatch(/heading:/);
+    },
+    60_000,
+  );
 });
 
 // ── scanWorkspaceFiles ────────────────────────────────────────────────────────

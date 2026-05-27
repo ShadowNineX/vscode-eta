@@ -75,7 +75,7 @@ export function buildVirtualContent(
 ): string {
   return (
     buildPreamble(itType) +
-    etaSource.split("\n").map(buildVirtualLine).join("\n") +
+    buildVirtualContentBody(etaSource) +
     // Append a module marker so TypeScript treats this as a module (not a
     // global script).  Without it every virtual file shares the same global
     // scope, causing the `it` declaration from one template to bleed into
@@ -90,15 +90,122 @@ export function consumeTagOpener(
   start: number,
 ): { padLen: number; next: number } {
   let i = start + 2; // skip <%
-  if (i < line.length && "=~#*".includes(line[i])) {
+  if (i < line.length && (line[i] === "-" || line[i] === "_")) {
     i++;
-  } else if (i < line.length && (line[i] === "-" || line[i] === "_")) {
-    i++;
-    if (i < line.length && (line[i] === "=" || line[i] === "~")) {
-      i++; // e.g. <%-= or <%_~
-    }
+  }
+  let prefix = i;
+  while (prefix < line.length && /[ \t]/.test(line[prefix])) {
+    prefix++;
+  }
+  if (prefix < line.length && "=~#*@".includes(line[prefix])) {
+    i = prefix + 1; // tag prefix, e.g. <%=, <%~, <%- =, <%@
   }
   return { padLen: i - start, next: i };
+}
+
+type Quote = '"' | "'" | "`";
+
+interface TagContentState {
+  quote: Quote | undefined;
+  lineComment: boolean;
+  blockComment: boolean;
+}
+
+interface TagContentChunk {
+  js: string;
+  next: number;
+}
+
+export interface EtaTagRange {
+  start: number;
+  end: number;
+  closed: boolean;
+  empty: boolean;
+}
+
+function consumeLineCommentChar(
+  line: string,
+  index: number,
+  state: TagContentState,
+): TagContentChunk {
+  state.lineComment = line[index] !== "\n";
+  return { js: line[index], next: index + 1 };
+}
+
+function consumeBlockCommentChar(
+  line: string,
+  index: number,
+  state: TagContentState,
+): TagContentChunk {
+  if (line[index] === "*" && line[index + 1] === "/") {
+    state.blockComment = false;
+    return { js: "*/", next: index + 2 };
+  }
+  return { js: line[index], next: index + 1 };
+}
+
+function consumeQuotedChar(
+  line: string,
+  index: number,
+  state: TagContentState,
+): TagContentChunk {
+  const ch = line[index];
+  if (ch === "\\") {
+    const next = Math.min(index + 2, line.length);
+    return { js: line.slice(index, next), next };
+  }
+  if (ch === state.quote) state.quote = undefined;
+  return { js: ch, next: index + 1 };
+}
+
+function consumeActiveTagState(
+  line: string,
+  index: number,
+  state: TagContentState,
+): TagContentChunk | undefined {
+  if (state.lineComment) return consumeLineCommentChar(line, index, state);
+  if (state.blockComment) return consumeBlockCommentChar(line, index, state);
+  if (state.quote) return consumeQuotedChar(line, index, state);
+  return undefined;
+}
+
+function consumeStateStart(
+  line: string,
+  index: number,
+  state: TagContentState,
+): TagContentChunk | undefined {
+  const pair = line.slice(index, index + 2);
+  if (pair === "//") {
+    state.lineComment = true;
+    return { js: pair, next: index + 2 };
+  }
+  if (pair === "/*") {
+    state.blockComment = true;
+    return { js: pair, next: index + 2 };
+  }
+  const ch = line[index];
+  if (ch === '"' || ch === "'" || ch === "`") {
+    state.quote = ch;
+    return { js: ch, next: index + 1 };
+  }
+  return undefined;
+}
+
+function consumeTagCloser(
+  line: string,
+  index: number,
+): TagContentChunk | undefined {
+  if (line[index] === "%" && line[index + 1] === ">") {
+    return { js: "  ", next: index + 2 };
+  }
+  if (
+    (line[index] === "-" || line[index] === "_") &&
+    line[index + 1] === "%" &&
+    line[index + 2] === ">"
+  ) {
+    return { js: "   ", next: index + 3 };
+  }
+  return undefined;
 }
 
 /** Consume JS content until closing %> (or -%> / _%>); returns js text and new index. */
@@ -106,42 +213,119 @@ export function consumeTagContent(
   line: string,
   start: number,
 ): { js: string; next: number } {
+  const state: TagContentState = {
+    quote: undefined,
+    lineComment: false,
+    blockComment: false,
+  };
   let js = "";
   let i = start;
+
   while (i < line.length) {
-    const ch = line[i];
-    if (
-      (ch === "-" || ch === "_") &&
-      line[i + 1] === "%" &&
-      line[i + 2] === ">"
-    ) {
-      return { js: js + "   ", next: i + 3 }; // -%> or _%>
+    const chunk =
+      consumeActiveTagState(line, i, state) ??
+      consumeStateStart(line, i, state);
+    if (chunk) {
+      js += chunk.js;
+      i = chunk.next;
+      continue;
     }
-    if (ch === "%" && line[i + 1] === ">") {
-      return { js: js + "  ", next: i + 2 }; // %>
-    }
-    js += ch;
+    const closer = consumeTagCloser(line, i);
+    if (closer) return { js: js + closer.js, next: closer.next };
+    js += line[i];
     i++;
   }
   return { js, next: i };
 }
 
 export function buildVirtualLine(line: string): string {
+  return buildVirtualContentBody(line);
+}
+
+function isClosedTagContent(source: string, from: number, to: number): boolean {
+  return (
+    to > from &&
+    (source.slice(to - 2, to) === "%>" ||
+      /^[-_]%>$/.test(source.slice(to - 3, to)))
+  );
+}
+
+function consumeVirtualTag(source: string, start: number): TagContentChunk {
+  const opener = consumeTagOpener(source, start);
+  let js = " ".repeat(opener.padLen);
+  let cursor = opener.next;
+
+  while (cursor < source.length) {
+    const content = consumeTagContent(source, cursor);
+    js += content.js;
+    if (isClosedTagContent(source, cursor, content.next)) {
+      return { js, next: content.next };
+    }
+    cursor = content.next;
+  }
+
+  return { js, next: cursor };
+}
+
+function buildVirtualContentBody(source: string): string {
   let out = "";
   let i = 0;
-  while (i < line.length) {
-    if (line[i] === "<" && line[i + 1] === "%") {
-      const opener = consumeTagOpener(line, i);
-      out += " ".repeat(opener.padLen);
-      const content = consumeTagContent(line, opener.next);
-      out += content.js;
-      i = content.next;
+  while (i < source.length) {
+    if (source[i] === "<" && source[i + 1] === "%") {
+      const tag = consumeVirtualTag(source, i);
+      out += tag.js;
+      i = tag.next;
     } else {
-      out += " "; // non-tag content → space (preserves positions)
+      out += source[i] === "\n" ? "\n" : " ";
       i++;
     }
   }
   return out;
+}
+
+function consumeEtaTagRange(source: string, start: number): EtaTagRange {
+  const opener = consumeTagOpener(source, start);
+  let cursor = opener.next;
+  let content = "";
+
+  while (cursor < source.length) {
+    const consumed = consumeTagContent(source, cursor);
+    content += consumed.js;
+    cursor = consumed.next;
+    if (isClosedTagContent(source, opener.next, cursor)) {
+      return {
+        start,
+        end: cursor,
+        closed: true,
+        empty: content.trim().length === 0,
+      };
+    }
+  }
+
+  return {
+    start,
+    end: cursor,
+    closed: false,
+    empty: content.trim().length === 0,
+  };
+}
+
+export function findEtaTagRanges(source: string): EtaTagRange[] {
+  const ranges: EtaTagRange[] = [];
+  let i = 0;
+
+  while (i < source.length) {
+    if (source[i] !== "<" || source[i + 1] !== "%") {
+      i++;
+      continue;
+    }
+
+    const range = consumeEtaTagRange(source, i);
+    ranges.push(range);
+    i = Math.max(range.end, range.start + 2);
+  }
+
+  return ranges;
 }
 
 // ── Workspace analysis ────────────────────────────────────────────────────────────────
@@ -545,17 +729,18 @@ export function positionToOffset(
 }
 
 export function isInsideEtaTag(line: string, character: number): boolean {
-  let depth = 0;
-  for (let i = 0; i < character && i < line.length; i++) {
-    if (line[i] === "<" && i + 1 < line.length && line[i + 1] === "%") {
-      depth++;
-      i++;
-    } else if (line[i] === "%" && i + 1 < line.length && line[i + 1] === ">") {
-      depth--;
-      i++;
-    }
-  }
-  return depth > 0;
+  return isInsideEtaTagInText(line, 0, character);
+}
+
+export function isInsideEtaTagInText(
+  text: string,
+  line: number,
+  character: number,
+): boolean {
+  const offset = positionToOffset(text, line, character);
+  return findEtaTagRanges(text).some(
+    (range) => offset >= range.start + 2 && offset < range.end,
+  );
 }
 
 export function tsKindToLSP(kind: string): CompletionItemKind {
@@ -652,14 +837,22 @@ connection.onCompletion((params: TextDocumentPositionParams) => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return [];
 
-  const lineText = doc.getText().split("\n")[params.position.line] ?? "";
-  if (!isInsideEtaTag(lineText, params.position.character)) return [];
+  const docText = doc.getText();
+  if (
+    !isInsideEtaTagInText(
+      docText,
+      params.position.line,
+      params.position.character,
+    )
+  ) {
+    return [];
+  }
 
   const virtualPath = getVirtualPath(params.textDocument.uri);
   // Always rebuild so the latest inferred `it` type is used even if this
   // file was opened before the workspace analysis finished.  The call is
   // cheap (no-op) when the content hasn't changed.
-  updateVirtualFile(params.textDocument.uri, doc.getText());
+  updateVirtualFile(params.textDocument.uri, docText);
 
   const virtualContent = virtualContents.get(virtualPath) ?? "";
   const virtualLine = params.position.line + PREAMBLE_LINE_COUNT;
@@ -686,14 +879,22 @@ connection.onHover((params: TextDocumentPositionParams): Hover | null => {
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return null;
 
-  const lineText = doc.getText().split("\n")[params.position.line] ?? "";
-  if (!isInsideEtaTag(lineText, params.position.character)) return null;
+  const docText = doc.getText();
+  if (
+    !isInsideEtaTagInText(
+      docText,
+      params.position.line,
+      params.position.character,
+    )
+  ) {
+    return null;
+  }
 
   const virtualPath = getVirtualPath(params.textDocument.uri);
   // Always rebuild so the latest inferred `it` type is used even if this
   // file was opened before the workspace analysis finished.  The call is
   // cheap (no-op) when the content hasn't changed.
-  updateVirtualFile(params.textDocument.uri, doc.getText());
+  updateVirtualFile(params.textDocument.uri, docText);
 
   const virtualContent = virtualContents.get(virtualPath) ?? "";
   const virtualLine = params.position.line + PREAMBLE_LINE_COUNT;
@@ -710,7 +911,8 @@ connection.onHover((params: TextDocumentPositionParams): Hover | null => {
   if (!info?.displayParts?.length) return null;
 
   const displayText = info.displayParts.map((p) => p.text).join("");
-  const docText = info.documentation?.map((p) => p.text).join("") ?? "";
+  const documentationText =
+    info.documentation?.map((p) => p.text).join("") ?? "";
 
   return {
     contents: {
@@ -719,7 +921,7 @@ connection.onHover((params: TextDocumentPositionParams): Hover | null => {
         "```typescript\n" +
         displayText +
         "\n```" +
-        (docText ? "\n\n" + docText : ""),
+        (documentationText ? "\n\n" + documentationText : ""),
     },
   };
 });

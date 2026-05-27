@@ -41,7 +41,7 @@
       "patterns": [
         {
           "name": "meta.tag.eta",
-          "begin": "<%([~=]|[-_][~=]?)?",
+          "begin": "<%[-_]?\\s*([~=])?",
           "end": "[-_]?%>",
           "beginCaptures": {
             "1": {
@@ -61,7 +61,7 @@
         },
         {
           "name": "meta.tag.custom.eta",
-          "begin": "<%([#*])",
+          "begin": "<%[-_]?\\s*([#*@])",
           "end": "[-_]?%>",
           "beginCaptures": {
             "1": {
@@ -297,7 +297,7 @@
           "patterns": [
             {
               "name": "meta.tag.eta",
-              "begin": "<%([~=]|[-_][~=]?)?",
+              "begin": "<%[-_]?\\s*([~=])?",
               "end": "[-_]?%>",
               "beginCaptures": {
                 "0": { "name": "keyword.operator.eta" }
@@ -320,7 +320,7 @@
           "patterns": [
             {
               "name": "meta.tag.eta",
-              "begin": "<%([~=]|[-_][~=]?)?",
+              "begin": "<%[-_]?\\s*([~=])?",
               "end": "[-_]?%>",
               "beginCaptures": {
                 "0": { "name": "keyword.operator.eta" }

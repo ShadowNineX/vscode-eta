@@ -58,7 +58,9 @@ import {
   consumeTagContent,
   buildVirtualLine,
   buildVirtualContent,
+  findEtaTagRanges,
   isInsideEtaTag,
+  isInsideEtaTagInText,
   positionToOffset,
   tsKindToLSP,
   typeToStructuralString,
@@ -169,6 +171,18 @@ describe("consumeTagContent", () => {
     expect(js).toBe(" it.html   "); // " it.html " + "  " for %>
     expect(next).toBe(14);
   });
+
+  it("ignores %> inside a string literal", () => {
+    const { js, next } = consumeTagContent('"%>" %>', 0);
+    expect(js).toBe('"%>"   ');
+    expect(next).toBe(7);
+  });
+
+  it("ignores %> inside a block comment", () => {
+    const { js, next } = consumeTagContent("/* %> */ value %>", 0);
+    expect(js).toBe("/* %> */ value   ");
+    expect(next).toBe(17);
+  });
 });
 
 // ── buildVirtualLine ──────────────────────────────────────────────────────────
@@ -218,6 +232,21 @@ describe("buildVirtualLine", () => {
     const vl = buildVirtualLine(line);
     expect(vl[4]).toBe(" ");
     expect(vl[5]).toBe("i");
+    expect(vl.length).toBe(line.length);
+  });
+
+  it("handles whitespace before an output prefix", () => {
+    const line = "<% = it.name %>";
+    const vl = buildVirtualLine(line);
+    expect(vl[5]).toBe("i");
+    expect(vl.substring(5, 12)).toBe("it.name");
+    expect(vl.length).toBe(line.length);
+  });
+
+  it("does not treat a JavaScript block comment as a custom prefix", () => {
+    const line = "<% /* comment */ %>";
+    const vl = buildVirtualLine(line);
+    expect(vl.substring(3, 16)).toBe("/* comment */");
     expect(vl.length).toBe(line.length);
   });
 
@@ -298,6 +327,21 @@ describe("buildVirtualContent", () => {
     // line2 (eta line 2) → virtual line PREAMBLE_LINE_COUNT + 2
     expect(lines[PREAMBLE_LINE_COUNT + 2]).toBe(buildVirtualLine("line2"));
   });
+
+  it("preserves JavaScript inside a multi-line Eta tag", () => {
+    const source = "<% for (const item of it.items) {\n output(item)\n} %>";
+    const vc = buildVirtualContent(source);
+    const lines = vc.split("\n");
+    expect(lines[PREAMBLE_LINE_COUNT]).toContain("for (const item");
+    expect(lines[PREAMBLE_LINE_COUNT + 1]).toContain("output(item)");
+    expect(lines[PREAMBLE_LINE_COUNT + 2]).toContain("}");
+  });
+
+  it("keeps a delimiter-looking string inside the virtual TypeScript", () => {
+    const source = '<%= "%>" %>';
+    const vc = buildVirtualContent(source);
+    expect(vc).toContain('"%>"');
+  });
 });
 
 // ── PREAMBLE_LINE_COUNT ───────────────────────────────────────────────────────
@@ -353,6 +397,42 @@ describe("isInsideEtaTag", () => {
 
   it("returns false for pure HTML line", () => {
     expect(isInsideEtaTag("<div>hello</div>", 5)).toBe(false);
+  });
+
+  it("ignores a delimiter-looking string when checking a single line", () => {
+    const line = '<%= "%>" + it.name %>';
+    expect(isInsideEtaTag(line, line.indexOf("it.name"))).toBe(true);
+  });
+});
+
+describe("isInsideEtaTagInText", () => {
+  it("returns true inside a multi-line Eta tag", () => {
+    const text = "<% for (const item of it.items) {\n output(item)\n} %>";
+    expect(isInsideEtaTagInText(text, 1, 3)).toBe(true);
+  });
+
+  it("returns false after a multi-line Eta tag closes", () => {
+    const text = "<% if (it.show) {\n output('yes')\n} %>\n<p>done</p>";
+    expect(isInsideEtaTagInText(text, 3, 1)).toBe(false);
+  });
+});
+
+describe("findEtaTagRanges", () => {
+  it("marks closed multi-line tags as closed", () => {
+    const ranges = findEtaTagRanges("<% if (it.show) {\n output('yes')\n} %>");
+    expect(ranges).toHaveLength(1);
+    expect(ranges[0].closed).toBe(true);
+  });
+
+  it("marks truly unclosed tags as unclosed", () => {
+    const ranges = findEtaTagRanges("<%= it.name");
+    expect(ranges).toHaveLength(1);
+    expect(ranges[0].closed).toBe(false);
+  });
+
+  it("marks empty tags", () => {
+    const ranges = findEtaTagRanges("<% %>");
+    expect(ranges[0].empty).toBe(true);
   });
 });
 

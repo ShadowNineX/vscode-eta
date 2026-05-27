@@ -111,7 +111,7 @@
   },
   "Comment": {
     "prefix": "comment",
-    "body": "<% /* ${1:comment}} */ %>",
+    "body": "<% /* ${1:comment} */ %>",
     "description": "Add a comment"
   },
   "HTML template": {

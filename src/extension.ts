@@ -108,6 +108,11 @@ const TAG_TYPES: { [key: string]: any } = {
     color: "variable",
     desc: "Custom tag (user-configured)",
   },
+  "<%@": {
+    name: "custom-tag",
+    color: "variable",
+    desc: "Custom tag (user-configured)",
+  },
   "<%-": {
     name: "whitespace-trim",
     color: "keyword",
@@ -119,6 +124,146 @@ const TAG_TYPES: { [key: string]: any } = {
     desc: "Execute + trim all whitespace before tag",
   },
 };
+
+interface EtaTagRange {
+  start: number;
+  end: number;
+  closed: boolean;
+  empty: boolean;
+}
+
+function positionToOffset(text: string, line: number, character: number): number {
+  const lines = text.split("\n");
+  let offset = 0;
+  for (let i = 0; i < line; i++) {
+    offset += (lines[i]?.length ?? 0) + 1;
+  }
+  return offset + character;
+}
+
+function consumeEtaTagOpener(source: string, start: number): number {
+  let i = start + 2;
+  if (source[i] === "-" || source[i] === "_") i++;
+  let prefix = i;
+  while (prefix < source.length && /[ \t]/.test(source[prefix])) prefix++;
+  if (prefix < source.length && "=~#*@".includes(source[prefix])) {
+    i = prefix + 1;
+  }
+  return i;
+}
+
+function consumeEtaTagContent(
+  source: string,
+  start: number,
+): { content: string; next: number; closed: boolean } {
+  let content = "";
+  let i = start;
+  let quote: '"' | "'" | "`" | undefined;
+  let lineComment = false;
+  let blockComment = false;
+
+  while (i < source.length) {
+    const ch = source[i];
+
+    if (lineComment) {
+      content += ch;
+      if (ch === "\n") lineComment = false;
+      i++;
+      continue;
+    }
+    if (blockComment) {
+      if (ch === "*" && source[i + 1] === "/") {
+        content += "*/";
+        i += 2;
+        blockComment = false;
+      } else {
+        content += ch;
+        i++;
+      }
+      continue;
+    }
+    if (quote) {
+      content += ch;
+      if (ch === "\\") {
+        if (i + 1 < source.length) content += source[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === quote) quote = undefined;
+      i++;
+      continue;
+    }
+
+    if (ch === "/" && source[i + 1] === "/") {
+      content += "//";
+      i += 2;
+      lineComment = true;
+      continue;
+    }
+    if (ch === "/" && source[i + 1] === "*") {
+      content += "/*";
+      i += 2;
+      blockComment = true;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      content += ch;
+      i++;
+      continue;
+    }
+
+    if (ch === "%" && source[i + 1] === ">") {
+      return { content, next: i + 2, closed: true };
+    }
+    if (
+      (ch === "-" || ch === "_") &&
+      source[i + 1] === "%" &&
+      source[i + 2] === ">"
+    ) {
+      return { content, next: i + 3, closed: true };
+    }
+
+    content += ch;
+    i++;
+  }
+
+  return { content, next: i, closed: false };
+}
+
+function findEtaTagRanges(text: string): EtaTagRange[] {
+  const ranges: EtaTagRange[] = [];
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== "<" || text[i + 1] !== "%") {
+      i++;
+      continue;
+    }
+
+    const start = i;
+    const contentStart = consumeEtaTagOpener(text, i);
+    const tag = consumeEtaTagContent(text, contentStart);
+    ranges.push({
+      start,
+      end: tag.next,
+      closed: tag.closed,
+      empty: tag.content.trim().length === 0,
+    });
+    i = Math.max(tag.next, start + 2);
+  }
+  return ranges;
+}
+
+function isInsideEtaTag(
+  document: vscode.TextDocument,
+  position: vscode.Position,
+): boolean {
+  const text = document.getText();
+  const offset = positionToOffset(text, position.line, position.character);
+  return findEtaTagRanges(text).some(
+    (range) => offset >= range.start + 2 && offset < range.end,
+  );
+}
 
 class EtaCompletionProvider implements vscode.CompletionItemProvider {
   provideCompletionItems(
@@ -132,7 +277,7 @@ class EtaCompletionProvider implements vscode.CompletionItemProvider {
     const completions: vscode.CompletionItem[] = [];
 
     // Check if inside Eta tag
-    const inTag = this.isInEtaTag(line, position.character);
+    const inTag = isInsideEtaTag(document, position);
 
     if (inTag) {
       // Add Eta functions and helpers
@@ -221,6 +366,11 @@ class EtaCompletionProvider implements vscode.CompletionItemProvider {
           detail: "Custom tag (user-configured)",
         },
         {
+          label: "<%@",
+          insertText: "<%@",
+          detail: "Custom tag (user-configured)",
+        },
+        {
           label: "<%-",
           insertText: "<%-",
           detail: "Execute + trim 1 newline before",
@@ -243,27 +393,6 @@ class EtaCompletionProvider implements vscode.CompletionItemProvider {
     }
 
     return completions;
-  }
-
-  private isInEtaTag(line: string, position: number): boolean {
-    let depth = 0;
-    let inTag = false;
-
-    for (let i = 0; i < position; i++) {
-      if (line.substring(i, i + 2) === "<%") {
-        inTag = true;
-        depth++;
-        i++; // Skip next char
-      } else if (line.substring(i, i + 2) === "%>") {
-        depth--;
-        if (depth === 0) {
-          inTag = false;
-        }
-        i++; // Skip next char
-      }
-    }
-
-    return inTag;
   }
 
   resolveCompletionItem(
@@ -335,85 +464,24 @@ class EtaDiagnosticsProvider {
   provideDiagnostics(document: vscode.TextDocument): void {
     const diagnostics: vscode.Diagnostic[] = [];
     const text = document.getText();
-    const lines = document.getText().split("\n");
+    const ranges = findEtaTagRanges(text);
 
-    // Check for mismatched tags
-    const tagRegex = /<%([#*@~=_-])?/g;
-    const closeRegex = /[-_]?%>/g;
-
-    let openCount = 0;
-    let closeCount = 0;
-
-    // Count tags
-    while (tagRegex.exec(text) !== null) {
-      openCount++;
-    }
-
-    while (closeRegex.exec(text) !== null) {
-      closeCount++;
-    }
-
-    if (openCount !== closeCount) {
-      const lastLine = lines.length - 1;
-      const lastChar = lines[lastLine].length;
-      const range = new vscode.Range(
-        lastLine,
-        Math.max(0, lastChar - 10),
-        lastLine,
-        lastChar,
-      );
-      const diagnostic = new vscode.Diagnostic(
-        range,
-        `Mismatched Eta tags: ${openCount} opening tags but ${closeCount} closing tags`,
-        vscode.DiagnosticSeverity.Error,
-      );
-      diagnostic.source = "Eta Linter";
-      diagnostics.push(diagnostic);
-    }
-
-    // Check for common mistakes
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-
-      // Check for unclosed tags — exclude comment/macro tags (<%# <%* <%/*) which
-      // legitimately span multiple lines; the overall count check catches those.
-      if (/<%(?![#*/])/.test(line) && !line.includes("%>")) {
-        const range = new vscode.Range(i, 0, i, line.length);
+    for (const tag of ranges) {
+      const start = document.positionAt(tag.start);
+      const end = document.positionAt(tag.end);
+      if (!tag.closed) {
         const diagnostic = new vscode.Diagnostic(
-          range,
-          "Possible unclosed Eta tag (extends to next line)",
-          vscode.DiagnosticSeverity.Warning,
+          new vscode.Range(start, end),
+          "Unclosed Eta tag",
+          vscode.DiagnosticSeverity.Error,
         );
         diagnostic.source = "Eta Linter";
         diagnostics.push(diagnostic);
-      }
-
-      // Check for empty tags
-      const emptyTagMatch = /<%\s*%>/.exec(line);
-      if (emptyTagMatch) {
-        const start = line.indexOf(emptyTagMatch[0]);
-        const range = new vscode.Range(
-          i,
-          start,
-          i,
-          start + emptyTagMatch[0].length,
-        );
+      } else if (tag.empty) {
         const diagnostic = new vscode.Diagnostic(
-          range,
+          new vscode.Range(start, end),
           "Empty Eta tag",
           vscode.DiagnosticSeverity.Information,
-        );
-        diagnostic.source = "Eta Linter";
-        diagnostics.push(diagnostic);
-      }
-
-      // Warn about common issues
-      if (line.includes("<%= it") && !line.includes("%>")) {
-        const range = new vscode.Range(i, 0, i, line.length);
-        const diagnostic = new vscode.Diagnostic(
-          range,
-          "Output tag not closed",
-          vscode.DiagnosticSeverity.Warning,
         );
         diagnostic.source = "Eta Linter";
         diagnostics.push(diagnostic);

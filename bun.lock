@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "eta",
+      "name": "vscode-eta",
       "dependencies": {
         "vscode-languageclient": "^9.0.1",
         "vscode-languageserver": "^9.0.1",

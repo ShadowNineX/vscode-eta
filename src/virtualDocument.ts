@@ -124,12 +124,29 @@ function maskNonNewlineContent(value: string): string {
   return value.replace(/[^\n]/g, " ");
 }
 
+function shouldTerminateExpressionTag(
+  prefix: string,
+  options: EtaLanguageOptions,
+): boolean {
+  return prefix === options.parse.interpolate || prefix === options.parse.raw;
+}
+
+function terminateExpressionTag(js: string): string {
+  for (let i = js.length - 1; i >= 0; i--) {
+    if (js[i] === " ") {
+      return js.slice(0, i) + ";" + js.slice(i + 1);
+    }
+  }
+  return js;
+}
+
 function consumeVirtualTag(
   source: string,
   start: number,
   options: EtaLanguageOptions,
 ): TagContentChunk {
   const opener = consumeTagOpener(source, start, options);
+  const terminateTag = shouldTerminateExpressionTag(opener.prefix, options);
   let js = " ".repeat(opener.padLen);
   let cursor = opener.next;
 
@@ -137,7 +154,10 @@ function consumeVirtualTag(
     const content = consumeTagContent(source, cursor, options);
     js += opener.contentIsJs ? content.js : maskNonNewlineContent(content.js);
     if (isClosedTagContent(source, cursor, content.next, options)) {
-      return { js, next: content.next };
+      return {
+        js: terminateTag ? terminateExpressionTag(js) : js,
+        next: content.next,
+      };
     }
     cursor = content.next;
   }

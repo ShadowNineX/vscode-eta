@@ -15,6 +15,7 @@ export default defineConfig({
   format: ["cjs"],
   platform: "node",
   target: "node18",
+  onSuccess: "bun run copy:typescript-libs",
   external: ["vscode"],
   noExternal: [
     "typescript",

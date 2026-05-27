@@ -9,6 +9,7 @@ bun.lock
 node_modules/
 coverage/
 .vitest/
+scripts/
 tsconfig.json
 tsup.config.ts
 vitest.config.ts
@@ -22,6 +23,7 @@ demo/
 *.d.ts
 **/*.map
 **/*.d.ts
+!out/lib*.d.ts
 out/*.test.js
 out/*.test.js.map
 out/*.test.d.ts

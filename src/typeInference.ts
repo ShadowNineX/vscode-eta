@@ -150,7 +150,9 @@ export function typeToStructuralString(
 
   if (checker.isArrayType(type)) {
     const el = checker.getTypeArguments(type as ts.TypeReference)[0];
-    return el ? `${typeToStructuralString(checker, el, depth + 1)}[]` : "any[]";
+    return el
+      ? `Array<${typeToStructuralString(checker, el, depth + 1)}>`
+      : "Array<any>";
   }
 
   if (checker.isTupleType(type)) {

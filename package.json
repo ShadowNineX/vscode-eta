@@ -43,8 +43,10 @@
   },
   "scripts": {
     "vscode:prepublish": "bun run compile",
-    "compile": "tsc -p ./ --noEmit && tsup",
-    "watch": "tsc -watch -p ./ --noEmit",
+    "compile": "bun run typecheck && tsup",
+    "copy:typescript-libs": "bun scripts/copyTypeScriptLibs.ts",
+    "typecheck": "tsc -p ./ --noEmit",
+    "watch": "tsup --watch",
     "test": "vitest run",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",

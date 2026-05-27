@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import * as ts from "typescript";
 import {
   DEFAULT_IT_TYPE,
   PREAMBLE_LINE_COUNT,
@@ -6,6 +7,7 @@ import {
   buildVirtualContent,
   buildVirtualLine,
 } from "../src/virtualDocument";
+import { positionToOffset } from "../src/position";
 
 // ── buildVirtualLine ──────────────────────────────────────────────────────────
 
@@ -85,6 +87,16 @@ describe("buildVirtualLine", () => {
     // "if (cond)" starts at position 3 in original
     expect(vl[3]).toBe("i");
     expect(vl[4]).toBe("f");
+    expect(vl.length).toBe(line.length);
+  });
+
+  it("separates multiple output tags on one line", () => {
+    const line = '<img src="<%= it.featuredImage %>" alt="<%= it.title %>">';
+    const vl = buildVirtualLine(line);
+
+    expect(vl).toContain("it.featuredImage");
+    expect(vl).toContain("it.title");
+    expect(vl).toMatch(/it\.featuredImage\s*;/);
     expect(vl.length).toBe(line.length);
   });
 
@@ -344,5 +356,97 @@ describe("buildVirtualContent (with itType)", () => {
     const source = "line0";
     const vc = buildVirtualContent(source, "{ x: number }");
     expect(vc.split("\n")[PREAMBLE_LINE_COUNT]).toBe(buildVirtualLine(source));
+  });
+
+  it("keeps array properties typed after multiple output tags on one line", () => {
+    const source =
+      '<img src="<%= it.featuredImage %>" alt="<%= it.title %>">\n' +
+      "<% it.tags.forEach(function(tag) { %><%= tag.toLowerCase() %><% }) %>";
+    const virtualPath = "virtual_eta_test.ts";
+    const virtualContent = buildVirtualContent(
+      source,
+      "{ featuredImage?: string; title: string; tags: Array<string> }",
+    );
+    const files = new Map([[virtualPath, virtualContent]]);
+    const service = ts.createLanguageService({
+      getScriptFileNames: () => [virtualPath],
+      getScriptVersion: () => "1",
+      getScriptSnapshot: (fileName) => {
+        const content = files.get(fileName) ?? ts.sys.readFile(fileName);
+        return content === undefined
+          ? undefined
+          : ts.ScriptSnapshot.fromString(content);
+      },
+      getCurrentDirectory: () => process.cwd(),
+      getCompilationSettings: () => ({
+        target: ts.ScriptTarget.ES2020,
+        module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler,
+        noEmit: true,
+        skipLibCheck: true,
+      }),
+      getDefaultLibFileName: ts.getDefaultLibFilePath,
+      fileExists: (fileName) => files.has(fileName) || ts.sys.fileExists(fileName),
+      readFile: (fileName) => files.get(fileName) ?? ts.sys.readFile(fileName),
+      readDirectory: ts.sys.readDirectory.bind(ts.sys),
+      directoryExists: ts.sys.directoryExists?.bind(ts.sys),
+      getDirectories: ts.sys.getDirectories?.bind(ts.sys),
+    });
+
+    const offset = positionToOffset(
+      virtualContent,
+      PREAMBLE_LINE_COUNT + 1,
+      source.split("\n")[1].indexOf("tags"),
+    );
+    const info = service.getQuickInfoAtPosition(virtualPath, offset);
+    const display = info?.displayParts?.map((part) => part.text).join("");
+
+    expect(service.getSemanticDiagnostics(virtualPath)).toEqual([]);
+    expect(display).toBe("(property) tags: string[]");
+  });
+
+  it("keeps string literal union methods typed in output tags", () => {
+    const source = "<%= it.status.toUpperCase() %>";
+    const virtualPath = "virtual_eta_status_test.ts";
+    const virtualContent = buildVirtualContent(
+      source,
+      '{ status: "draft" | "published" | "archived" }',
+    );
+    const files = new Map([[virtualPath, virtualContent]]);
+    const service = ts.createLanguageService({
+      getScriptFileNames: () => [virtualPath],
+      getScriptVersion: () => "1",
+      getScriptSnapshot: (fileName) => {
+        const content = files.get(fileName) ?? ts.sys.readFile(fileName);
+        return content === undefined
+          ? undefined
+          : ts.ScriptSnapshot.fromString(content);
+      },
+      getCurrentDirectory: () => process.cwd(),
+      getCompilationSettings: () => ({
+        target: ts.ScriptTarget.ES2020,
+        module: ts.ModuleKind.ESNext,
+        moduleResolution: ts.ModuleResolutionKind.Bundler,
+        noEmit: true,
+        skipLibCheck: true,
+      }),
+      getDefaultLibFileName: ts.getDefaultLibFilePath,
+      fileExists: (fileName) => files.has(fileName) || ts.sys.fileExists(fileName),
+      readFile: (fileName) => files.get(fileName) ?? ts.sys.readFile(fileName),
+      readDirectory: ts.sys.readDirectory.bind(ts.sys),
+      directoryExists: ts.sys.directoryExists?.bind(ts.sys),
+      getDirectories: ts.sys.getDirectories?.bind(ts.sys),
+    });
+
+    const offset = positionToOffset(
+      virtualContent,
+      PREAMBLE_LINE_COUNT,
+      source.indexOf("toUpperCase"),
+    );
+    const info = service.getQuickInfoAtPosition(virtualPath, offset);
+    const display = info?.displayParts?.map((part) => part.text).join("");
+
+    expect(service.getSemanticDiagnostics(virtualPath)).toEqual([]);
+    expect(display).toBe("(method) String.toUpperCase(): string");
   });
 });

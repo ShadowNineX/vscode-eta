@@ -138,7 +138,7 @@ describe("typeToStructuralString", () => {
 
   it("handles string arrays", () => {
     const { checker, type } = getNamedVarType(`const x: string[] = [];`, "x");
-    expect(typeToStructuralString(checker, type)).toBe("string[]");
+    expect(typeToStructuralString(checker, type)).toBe("Array<string>");
   });
 
   it("handles union types", () => {
@@ -398,7 +398,7 @@ describe("analyzeFileForEtaCalls", () => {
     expect(result).toMatch(/title: string/);
     expect(result).toMatch(/price: number/);
     expect(result).toMatch(/inStock: boolean/);
-    expect(result).toMatch(/tags: string\[\]/);
+    expect(result).toMatch(/tags: Array<string>/);
   });
 
   it("resolves nested object type for dashboard-style templates", () => {
@@ -712,7 +712,7 @@ describe("greeting vs dashboard type isolation", () => {
     expect(templateDataTypeMap.get("user")).toMatch(/name: string/);
     expect(templateDataTypeMap.get("user")).toMatch(/age: number/);
     expect(templateDataTypeMap.get("product")).toMatch(/inStock: boolean/);
-    expect(templateDataTypeMap.get("product")).toMatch(/tags: string\[\]/);
+    expect(templateDataTypeMap.get("product")).toMatch(/tags: Array<string>/);
     expect(templateDataTypeMap.get("order")).toMatch(/id: number/);
     expect(templateDataTypeMap.get("order")).toMatch(/total: number/);
   });
@@ -738,7 +738,7 @@ describe("complex type inference — unit tests via makeTestProgram", () => {
     );
     analyzeFileForEtaCalls(sf, checker);
     const type = templateDataTypeMap.get("post");
-    expect(type).toMatch(/tags: string\[\]/);
+    expect(type).toMatch(/tags: Array<string>/);
     expect(type).toMatch(/title: string/);
   });
 
@@ -757,7 +757,7 @@ describe("complex type inference — unit tests via makeTestProgram", () => {
     expect(type).toMatch(/id: number/);
     expect(type).toMatch(/body: string/);
     expect(type).toMatch(/likes: number/);
-    expect(type).toMatch(/\[\]/); // array marker
+    expect(type).toMatch(/Array</); // array marker
   });
 
   it("union string literals are preserved intact", () => {
@@ -819,7 +819,7 @@ describe("complex type inference — unit tests via makeTestProgram", () => {
     expect(type).toMatch(/title: string/);
     expect(type).toMatch(/price: number/);
     expect(type).toMatch(/inStock: boolean/);
-    expect(type).toMatch(/tags: string\[\]/);
+    expect(type).toMatch(/tags: Array<string>/);
     expect(type).toMatch(/subtotal: number/);
     expect(type).toMatch(/tax: number/);
     expect(type).toMatch(/total: number/);
@@ -848,7 +848,7 @@ describe("complex type inference — unit tests via makeTestProgram", () => {
     expect(type).toMatch(/status:/);
     expect(type).toMatch(/"published"/);
     // tags array
-    expect(type).toMatch(/tags: string\[\]/);
+    expect(type).toMatch(/tags: Array<string>/);
     // author nested fields
     expect(type).toMatch(/author:/);
     expect(type).toMatch(/name: string/);
@@ -914,7 +914,7 @@ describe("complex type inference — integration with real demo/src/index.ts", (
     expect(type).toMatch(/status:/);
     expect(type).toMatch(/"published"/);
     // string array
-    expect(type).toMatch(/tags: string\[\]/);
+    expect(type).toMatch(/tags: Array<string>/);
     // nested author object
     expect(type).toMatch(/author:/);
     expect(type).toMatch(/name: string/);
@@ -966,7 +966,7 @@ describe("complex type inference — integration with real demo/src/index.ts", (
     // doubly-nested product fields inside CartItem
     expect(type).toMatch(/price: number/);
     expect(type).toMatch(/inStock: boolean/);
-    expect(type).toMatch(/tags: string\[\]/);
+    expect(type).toMatch(/tags: Array<string>/);
   });
 
   it("cart: does NOT bleed into blog-post or notification", () => {
@@ -1046,7 +1046,7 @@ describe("demo scenarios from Eta docs", () => {
 
     expect(pageType).toMatch(/content: string/);
     expect(pageType).toMatch(/conversionRate: number/);
-    expect(pageType).toMatch(/scripts: string\[\]/);
+    expect(pageType).toMatch(/scripts: Array<string>/);
     expect(shellType).toMatch(/body: string/);
     expect(shellType).toMatch(/navItems:/);
     expect(shellType).not.toContain("conversionRate");
@@ -1081,7 +1081,7 @@ describe("demo scenarios from Eta docs", () => {
     const type = templateDataTypeMap.get("configured-card");
     expect(type).toMatch(/title: string/);
     expect(type).toMatch(/html: string/);
-    expect(type).toMatch(/tags: string\[\]/);
+    expect(type).toMatch(/tags: Array<string>/);
     expect(type).toMatch(/owner:/);
     expect(type).toMatch(/score: number/);
   });

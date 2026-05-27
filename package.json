@@ -4,11 +4,23 @@
   "description": "Advanced syntax highlighting, intellisense, autocomplete, and diagnostics for Eta templating language",
   "version": "0.1.0",
   "publisher": "eta-lang",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.120.0"
   },
   "categories": [
     "Programming Languages"
+  ],
+  "keywords": [
+    "eta",
+    "template",
+    "templating",
+    "language",
+    "intellisense",
+    "syntax"
+  ],
+  "activationEvents": [
+    "onLanguage:eta"
   ],
   "main": "./out/extension.js",
   "devDependencies": {

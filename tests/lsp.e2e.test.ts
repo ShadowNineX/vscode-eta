@@ -251,7 +251,7 @@ describe("bundled language server", () => {
         text: manifestTemplateSource,
       },
     });
-  }, 120_000);
+  }, 30_000);
 
   afterAll(async () => {
     if (connection) {

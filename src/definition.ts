@@ -15,7 +15,8 @@ function getDataAccess(expression: ts.Expression): DataAccess | undefined {
     ts.isParenthesizedExpression(expression) ||
     ts.isNonNullExpression(expression) ||
     ts.isAsExpression(expression) ||
-    ts.isTypeAssertionExpression(expression)
+    ts.isTypeAssertionExpression(expression) ||
+    ts.isSatisfiesExpression(expression)
   ) {
     return getDataAccess(expression.expression);
   }
@@ -45,6 +46,143 @@ function getDataAccess(expression: ts.Expression): DataAccess | undefined {
   }
 
   return undefined;
+}
+
+function resolveDataAccessPath(
+  access: DataAccess,
+  aliases: Map<string, string[]>,
+  options: EtaLanguageOptions,
+): string[] | undefined {
+  if (access.root === options.varName) return access.path;
+  const aliasPath = aliases.get(access.root);
+  if (aliasPath) return [...aliasPath, ...access.path];
+  return options.useWith ? [access.root, ...access.path] : undefined;
+}
+
+function getBindingPropertyName(
+  element: ts.BindingElement,
+): string | undefined {
+  const propertyName = element.propertyName;
+  if (propertyName === undefined) {
+    if (ts.isIdentifier(element.name)) return element.name.text;
+    return undefined;
+  }
+
+  if (
+    ts.isIdentifier(propertyName) ||
+    ts.isStringLiteral(propertyName) ||
+    ts.isNumericLiteral(propertyName)
+  ) {
+    return propertyName.text;
+  }
+  return undefined;
+}
+
+function bindObjectDataAliases(
+  name: ts.ObjectBindingPattern,
+  basePath: string[],
+  aliases: Map<string, string[]>,
+): void {
+  for (const element of name.elements) {
+    if (element.dotDotDotToken) continue;
+    const propertyName = getBindingPropertyName(element);
+    if (propertyName === undefined) continue;
+    bindDataAlias(element.name, [...basePath, propertyName], aliases);
+  }
+}
+
+function bindArrayDataAliases(
+  name: ts.ArrayBindingPattern,
+  basePath: string[],
+  aliases: Map<string, string[]>,
+): void {
+  for (const element of name.elements) {
+    if (!ts.isBindingElement(element) || element.dotDotDotToken) continue;
+    bindDataAlias(element.name, basePath, aliases);
+  }
+}
+
+function bindDataAlias(
+  name: ts.BindingName,
+  basePath: string[],
+  aliases: Map<string, string[]>,
+): void {
+  if (ts.isIdentifier(name)) {
+    aliases.set(name.text, basePath);
+    return;
+  }
+
+  if (ts.isObjectBindingPattern(name)) {
+    bindObjectDataAliases(name, basePath, aliases);
+    return;
+  }
+
+  bindArrayDataAliases(name, basePath, aliases);
+}
+
+function getCallbackDataPath(
+  parameter: ts.ParameterDeclaration,
+  aliases: Map<string, string[]>,
+  options: EtaLanguageOptions,
+): string[] | undefined {
+  const callback = parameter.parent;
+  if (
+    (!ts.isArrowFunction(callback) && !ts.isFunctionExpression(callback)) ||
+    callback.parameters[0] !== parameter ||
+    !ts.isCallExpression(callback.parent) ||
+    !ts.isPropertyAccessExpression(callback.parent.expression) ||
+    callback.parent.arguments[0] !== callback
+  ) {
+    return undefined;
+  }
+  const method = callback.parent.expression.name.text;
+  if (!["every", "filter", "find", "flatMap", "forEach", "map", "some"].includes(method)) {
+    return undefined;
+  }
+  const access = getDataAccess(callback.parent.expression.expression);
+  return access
+    ? resolveDataAccessPath(access, aliases, options)
+    : undefined;
+}
+
+function collectDataAliases(
+  sourceFile: ts.SourceFile,
+  options: EtaLanguageOptions,
+): Map<string, string[]> {
+  const aliases = new Map<string, string[]>();
+
+  function pathForExpression(
+    expression: ts.Expression,
+  ): string[] | undefined {
+    const access = getDataAccess(expression);
+    return access
+      ? resolveDataAccessPath(access, aliases, options)
+      : undefined;
+  }
+
+  function visit(node: ts.Node): void {
+    if (ts.isVariableDeclaration(node)) {
+      let expression = node.initializer;
+      const declarationList = node.parent;
+      const loop = declarationList.parent;
+      if (
+        !expression &&
+        ts.isVariableDeclarationList(declarationList) &&
+        ts.isForOfStatement(loop)
+      ) {
+        expression = loop.expression;
+      }
+      const dataPath = expression && pathForExpression(expression);
+      if (dataPath) bindDataAlias(node.name, dataPath, aliases);
+    } else if (ts.isParameter(node)) {
+      const dataPath = getCallbackDataPath(node, aliases, options);
+      if (dataPath) bindDataAlias(node.name, dataPath, aliases);
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return aliases;
 }
 
 /**
@@ -100,14 +238,11 @@ export function getEtaDataPathAtPosition(
   if (!expression) return undefined;
   const access = getDataAccess(expression);
   if (!access) return undefined;
-
-  if (access.root === options.varName || access.root === "it") {
-    return access.path;
-  }
-  if (options.useWith) {
-    return [access.root, ...access.path];
-  }
-  return undefined;
+  return resolveDataAccessPath(
+    access,
+    collectDataAliases(sourceFile, options),
+    options,
+  );
 }
 
 export function offsetToPosition(

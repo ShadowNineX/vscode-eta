@@ -7,13 +7,24 @@ import {
   getDataDefinitionsForUri,
   templateDataDefinitionMap,
   templateDataTypeMap,
+  templateRelationshipMap,
   workspaceEtaFiles,
+  workspaceTsFiles,
 } from "../src/typeInference";
+import { canonicalTemplatePath } from "../src/templatePaths";
+import { DEFAULT_ETA_LANGUAGE_OPTIONS } from "../src/etaConfig";
+import {
+  ETA_LANGUAGE_SUPPORT_MANIFEST,
+  sha256Text,
+} from "../src/etaManifest";
+import { positionToOffset } from "../src/position";
+import { buildVirtualDocument } from "../src/virtualDocument";
 
 const mocks = vi.hoisted(() => {
   return {
     connection: {
       onInitialize: vi.fn(),
+      onInitialized: vi.fn(),
       onCompletion: vi.fn(),
       onHover: vi.fn(),
       onDefinition: vi.fn(),
@@ -27,6 +38,9 @@ const mocks = vi.hoisted(() => {
         },
       },
       onDidChangeWatchedFiles: vi.fn(),
+      workspace: {
+        onDidChangeWorkspaceFolders: vi.fn(),
+      },
       listen: vi.fn(),
       console: {
         debug: vi.fn(),
@@ -39,6 +53,7 @@ const mocks = vi.hoisted(() => {
     documents: {
       onDidOpen: vi.fn(),
       onDidChangeContent: vi.fn(),
+      onDidClose: vi.fn(),
       get: vi.fn(),
       listen: vi.fn(),
     },
@@ -74,6 +89,7 @@ vi.mock("vscode-languageserver/node", () => ({
     Error: 1,
     Warning: 2,
     Information: 3,
+    Hint: 4,
   },
 }));
 
@@ -97,6 +113,13 @@ describe("server entrypoint", () => {
     expect(initializeResult.capabilities.renameProvider).toBe(true);
     expect(initializeResult.capabilities.signatureHelpProvider).toBeTruthy();
     expect(initializeResult.capabilities.semanticTokensProvider).toBeTruthy();
+    expect(
+      initializeResult.capabilities.semanticTokensProvider.legend.tokenTypes,
+    ).toContain("keyword");
+    expect(initializeResult.capabilities.workspace.workspaceFolders).toEqual({
+      supported: true,
+      changeNotifications: true,
+    });
 
     expect(mocks.connection.onCompletion).toHaveBeenCalledTimes(1);
     expect(mocks.connection.onHover).toHaveBeenCalledTimes(1);
@@ -110,6 +133,35 @@ describe("server entrypoint", () => {
     expect(mocks.connection.onDidChangeWatchedFiles).toHaveBeenCalledTimes(1);
     expect(mocks.documents.onDidOpen).toHaveBeenCalledTimes(1);
     expect(mocks.documents.onDidChangeContent).toHaveBeenCalledTimes(1);
+    expect(mocks.connection.onInitialized).toHaveBeenCalledTimes(1);
+    mocks.connection.onInitialized.mock.calls[0][0]();
+    expect(
+      mocks.connection.workspace.onDidChangeWorkspaceFolders,
+    ).toHaveBeenCalledTimes(1);
+    expect(mocks.documents.onDidClose).toHaveBeenCalledTimes(1);
+    const workspaceChange =
+      mocks.connection.workspace.onDidChangeWorkspaceFolders.mock.calls[0][0];
+    const workspaceDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "eta-workspace-folder-"),
+    );
+    const workspaceTemplate = path.join(workspaceDir, "folder.eta");
+    const workspaceScript = path.join(workspaceDir, "folder.mts");
+    fs.writeFileSync(workspaceTemplate, "");
+    fs.writeFileSync(workspaceScript, "export const value = 1;");
+    const workspaceFolder = {
+      uri: pathToFileURL(workspaceDir).toString(),
+      name: "fixture",
+    };
+    workspaceChange({ added: [workspaceFolder], removed: [] });
+    const hasWorkspaceFile = (files: Set<string>, expected: string) =>
+      [...files].some(
+        (fileName) => path.resolve(fileName) === path.resolve(expected),
+      );
+    expect(hasWorkspaceFile(workspaceEtaFiles, workspaceTemplate)).toBe(true);
+    expect(hasWorkspaceFile(workspaceTsFiles, workspaceScript)).toBe(true);
+    workspaceChange({ added: [], removed: [workspaceFolder] });
+    expect(hasWorkspaceFile(workspaceEtaFiles, workspaceTemplate)).toBe(false);
+    expect(hasWorkspaceFile(workspaceTsFiles, workspaceScript)).toBe(false);
     expect(mocks.documents.listen).toHaveBeenCalledTimes(1);
     const completion = mocks.connection.onCompletion.mock.calls[0][0];
     const hover = mocks.connection.onHover.mock.calls[0][0];
@@ -319,6 +371,10 @@ describe("server entrypoint", () => {
     fs.writeFileSync(blockLayoutPath, blockLayoutSource);
     workspaceEtaFiles.add(blockChildPath);
     workspaceEtaFiles.add(blockLayoutPath);
+    const childKey = canonicalTemplatePath(blockChildPath);
+    const layoutKey = canonicalTemplatePath(blockLayoutPath);
+    templateRelationshipMap.set(childKey, new Set([layoutKey]));
+    templateRelationshipMap.set(layoutKey, new Set([childKey]));
     const openDocuments = new Map([
       [
         blockLayoutUri,
@@ -351,11 +407,14 @@ describe("server entrypoint", () => {
 
     initialize({
       initializationOptions: {
-        etaLanguageOptions: { customTags: ["#"] },
+        etaLanguageOptions: {
+          tags: { open: "{{", close: "}}" },
+          customTagTypes: { "#": "text" },
+        },
       },
       workspaceFolders: [],
     });
-    const semanticSource = "<%# custom content %>";
+    const semanticSource = "{{# custom content }}";
     const semanticDocument = { uri: pageUri, getText: () => semanticSource };
     mocks.documents.get.mockImplementation((uri: string) =>
       uri === pageUri ? semanticDocument : undefined,
@@ -364,12 +423,238 @@ describe("server entrypoint", () => {
       mocks.connection.languages.semanticTokens.on.mock.calls[0][0]({
         textDocument: { uri: pageUri },
       });
-    expect(semanticTokens.data).toEqual([0, 0, 3, 0, 0]);
+    expect(semanticTokens.data).toEqual([0, 0, 3, 5, 0]);
+    mocks.documents.onDidClose.mock.calls[0][0]({ document: semanticDocument });
+    const diagnosticCalls = mocks.connection.sendDiagnostics.mock.calls;
+    expect(diagnosticCalls[diagnosticCalls.length - 1][0]).toEqual({
+      uri: pageUri,
+      diagnostics: [],
+    });
+
+    const manifestRoot = fs.mkdtempSync(
+      path.join(os.tmpdir(), "eta-manifest-server-"),
+    );
+    const manifestTemplatePath = path.join(manifestRoot, "profile.eta");
+    const manifestDataPath = path.join(manifestRoot, "runtime-data.ts");
+    const manifestTemplateUri = pathToFileURL(manifestTemplatePath).toString();
+    const manifestDataUri = pathToFileURL(manifestDataPath).toString();
+    const manifestSource =
+      '<%= it.runtimeName %>\n<%~ include("runtime-") %>';
+    const manifestDataSource =
+      'export const runtimeName = "generated";\n';
+    fs.writeFileSync(manifestTemplatePath, manifestSource);
+    fs.writeFileSync(manifestDataPath, manifestDataSource);
+    const manifestVirtual = buildVirtualDocument(
+      manifestSource,
+      "{ runtimeName: string }",
+      DEFAULT_ETA_LANGUAGE_OPTIONS,
+    );
+    const manifestBodyStart = positionToOffset(
+      manifestVirtual.content,
+      manifestVirtual.preambleLineCount,
+      0,
+    );
+    const runtimeReferenceStart = manifestSource.indexOf("runtimeName");
+    const runtimeDefinitionStart =
+      manifestDataSource.indexOf("runtimeName");
+    fs.writeFileSync(
+      path.join(manifestRoot, ETA_LANGUAGE_SUPPORT_MANIFEST),
+      JSON.stringify({
+        version: 1,
+        inputs: [
+          {
+            path: "runtime-data.ts",
+            sha256: sha256Text(manifestDataSource),
+          },
+        ],
+        templates: [
+          {
+            path: "profile.eta",
+            sha256: sha256Text(manifestSource),
+            options: DEFAULT_ETA_LANGUAGE_OPTIONS,
+            dataType: "{ runtimeName: string }",
+            dataDefinitions: [
+              {
+                dataPath: ["runtimeName"],
+                location: {
+                  path: "runtime-data.ts",
+                  start: runtimeDefinitionStart,
+                  length: "runtimeName".length,
+                },
+              },
+            ],
+            resolution: { views: null, defaultExtension: ".eta" },
+            relationships: [],
+            diagnostics: [
+              {
+                start: runtimeReferenceStart,
+                length: "runtimeName".length,
+                severity: "warning",
+                source: "Eta runtime generator",
+                message: "Generated manifest warning",
+              },
+            ],
+            virtualDocument: {
+              content: manifestVirtual.content,
+              mappings: [
+                {
+                  sourceStart: 0,
+                  sourceLength: manifestSource.length,
+                  virtualStart: manifestBodyStart,
+                  virtualLength: manifestSource.length,
+                },
+              ],
+            },
+          },
+        ],
+        templateNames: [
+          {
+            name: "runtime-profile",
+            template: "profile.eta",
+            definition: {
+              path: "runtime-data.ts",
+              start: runtimeDefinitionStart,
+              length: "runtimeName".length,
+            },
+          },
+        ],
+        symbols: [
+          {
+            id: "runtime:name",
+            occurrences: [
+              {
+                path: "runtime-data.ts",
+                start: runtimeDefinitionStart,
+                length: "runtimeName".length,
+                role: "definition",
+              },
+              {
+                path: "profile.eta",
+                start: runtimeReferenceStart,
+                length: "runtimeName".length,
+                role: "reference",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const manifestFolder = {
+      uri: pathToFileURL(manifestRoot).toString(),
+      name: "manifest-fixture",
+    };
+    workspaceChange({ added: [manifestFolder], removed: [] });
+    const manifestDocument = {
+      uri: manifestTemplateUri,
+      getText: () => manifestSource,
+    };
+    mocks.documents.get.mockImplementation((uri: string) =>
+      uri === manifestTemplateUri ? manifestDocument : undefined,
+    );
+    mocks.documents.onDidOpen.mock.calls[0][0]({
+      document: manifestDocument,
+    });
+
+    const manifestDefinition =
+      mocks.connection.onDefinition.mock.calls[0][0]({
+        textDocument: { uri: manifestTemplateUri },
+        position: {
+          line: 0,
+          character: runtimeReferenceStart + 2,
+        },
+      });
+    expect(manifestDefinition?.[0].uri).toBe(manifestDataUri);
+    const manifestReferences =
+      mocks.connection.onReferences.mock.calls[0][0]({
+        textDocument: { uri: manifestTemplateUri },
+        position: {
+          line: 0,
+          character: runtimeReferenceStart + 2,
+        },
+        context: { includeDeclaration: true },
+      });
+    expect(manifestReferences).toHaveLength(2);
+    const manifestRename =
+      mocks.connection.onRenameRequest.mock.calls[0][0]({
+        textDocument: { uri: manifestTemplateUri },
+        position: {
+          line: 0,
+          character: runtimeReferenceStart + 2,
+        },
+        newName: "renamedRuntime",
+      });
+    expect(Object.keys(manifestRename.changes)).toEqual(
+      expect.arrayContaining([manifestTemplateUri, manifestDataUri]),
+    );
+    const manifestDataCompletions = completion({
+      textDocument: { uri: manifestTemplateUri },
+      position: { line: 0, character: "<%= it.".length },
+    });
+    expect(
+      manifestDataCompletions.map((item: { label: string }) => item.label),
+    ).toContain("runtimeName");
+    const manifestPathCompletions = completion({
+      textDocument: { uri: manifestTemplateUri },
+      position: {
+        line: 1,
+        character: '<%~ include("runtime-'.length,
+      },
+    });
+    expect(
+      manifestPathCompletions.map((item: { label: string }) => item.label),
+    ).toContain("runtime-profile");
+    const manifestDiagnosticCall =
+      mocks.connection.sendDiagnostics.mock.calls[
+        mocks.connection.sendDiagnostics.mock.calls.length - 1
+      ][0];
+    expect(manifestDiagnosticCall.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: "Generated manifest warning",
+          source: "Eta runtime generator",
+        }),
+      ]),
+    );
+    const manifestTokens =
+      mocks.connection.languages.semanticTokens.on.mock.calls[0][0]({
+        textDocument: { uri: manifestTemplateUri },
+      });
+    expect(manifestTokens.data.length).toBeGreaterThan(0);
+    const staleManifestSource = manifestSource.replace(
+      "runtimeName",
+      "staleValue_",
+    );
+    const staleManifestDocument = {
+      uri: manifestTemplateUri,
+      getText: () => staleManifestSource,
+    };
+    mocks.documents.get.mockImplementation((uri: string) =>
+      uri === manifestTemplateUri ? staleManifestDocument : undefined,
+    );
+    mocks.documents.onDidChangeContent.mock.calls[0][0]({
+      document: staleManifestDocument,
+    });
+    const staleDefinition =
+      mocks.connection.onDefinition.mock.calls[0][0]({
+        textDocument: { uri: manifestTemplateUri },
+        position: {
+          line: 0,
+          character: staleManifestSource.indexOf("staleValue_") + 2,
+        },
+      });
+    expect(
+      staleDefinition?.some(
+        (location: { uri: string }) => location.uri === manifestDataUri,
+      ) ?? false,
+    ).toBe(false);
+    workspaceChange({ added: [], removed: [manifestFolder] });
+    fs.rmSync(manifestRoot, { recursive: true, force: true });
 
     workspaceEtaFiles.delete(pagePath);
     workspaceEtaFiles.delete(partialPath);
     workspaceEtaFiles.delete(blockChildPath);
     workspaceEtaFiles.delete(blockLayoutPath);
+    templateRelationshipMap.clear();
     expect(mocks.connection.sendDiagnostics).toHaveBeenCalled();
 
     expect(mocks.connection.listen).toHaveBeenCalledTimes(1);

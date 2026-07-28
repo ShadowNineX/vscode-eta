@@ -8,12 +8,16 @@ import { DEFAULT_IT_TYPE } from "../src/virtualDocument";
 import {
   analyzeEtaTemplateLayouts,
   analyzeFileForEtaCalls,
+  analyzeWorkspaceFiles,
   getDataDefinitionsForUri,
   getItTypeForUri,
   scanWorkspaceFiles,
   templateDataDefinitionMap,
   templateDataTypeMap,
   templateLanguageOptionsMap,
+  templateRegistrationMap,
+  templateRelationshipMap,
+  templateResolutionOptionsMap,
   typeToStructuralString,
   workspaceEtaFiles,
   workspaceTsFiles,
@@ -23,12 +27,18 @@ import {
 // ── Test helpers ────────────────────────────────────────────────────────────────
 
 /** Build a minimal real TypeScript program so we can get a TypeChecker. */
-function makeTestProgram(code: string): {
+function makeTestProgram(
+  code: string,
+  declarationsComeFromEta = true,
+): {
   checker: ts.TypeChecker;
   sf: ts.SourceFile;
 } {
+  const fileName = declarationsComeFromEta
+    ? path.join(process.cwd(), "node_modules", "eta", "test-fixture.ts")
+    : "eta_test.ts";
   const sf = ts.createSourceFile(
-    "eta_test.ts",
+    fileName,
     code,
     ts.ScriptTarget.ES2020,
     /*setParentNodes*/ true,
@@ -36,9 +46,9 @@ function makeTestProgram(code: string): {
   const host = ts.createCompilerHost({}, true);
   const orig = host.getSourceFile.bind(host);
   host.getSourceFile = (name, lang) =>
-    name === "eta_test.ts" ? sf : orig(name, lang);
+    path.normalize(name) === path.normalize(fileName) ? sf : orig(name, lang);
   const program = ts.createProgram(
-    ["eta_test.ts"],
+    [fileName],
     {
       target: ts.ScriptTarget.ES2020,
       strict: true,
@@ -283,7 +293,12 @@ describe("analyzeFileForEtaCalls", () => {
          varName: "data",
          useWith: true,
          functionHeader: "const helper = data.name",
-         outputFunctionName: "print"
+         outputFunctionName: "print",
+         async: true,
+         autoEscape: false,
+         autoFilter: true,
+         autoTrim: ["slurp", false],
+         rmWhitespace: true
        });
        eta.render("profile", { name: "Ada" });`,
     );
@@ -299,6 +314,13 @@ describe("analyzeFileForEtaCalls", () => {
     expect(options?.useWith).toBe(true);
     expect(options?.functionHeader).toBe("const helper = data.name");
     expect(options?.outputFunctionName).toBe("print");
+    expect(options).toMatchObject({
+      async: true,
+      autoEscape: false,
+      autoFilter: true,
+      autoTrim: ["slurp", false],
+      rmWhitespace: true,
+    });
   });
 
   it("applies simple eta.configure({ ... }) calls before render analysis", () => {
@@ -379,7 +401,7 @@ describe("analyzeFileForEtaCalls", () => {
     analyzeEtaTemplateLayouts([firstPath, secondPath]);
 
     const type = templateDataTypeMap.get("base");
-    expect(type).toContain("&");
+    expect(type).toContain("|");
     expect(type).toMatch(/title: string/);
     expect(type).toMatch(/count: number/);
     expect(type).toMatch(/body: string/);
@@ -422,7 +444,7 @@ describe("analyzeFileForEtaCalls", () => {
     expect(layoutType).toMatch(/body: string/);
   });
 
-  it("merges multiple call sites for the same template via intersection", () => {
+  it("keeps multiple call-site data shapes as a sound union", () => {
     const { checker, sf } = makeTestProgram(
       `declare function render(t: string, d: any): string;\n` +
         `render("page", { title: "Home" });\n` +
@@ -430,19 +452,28 @@ describe("analyzeFileForEtaCalls", () => {
     );
     analyzeFileForEtaCalls(sf, checker);
     const result = templateDataTypeMap.get("page");
-    expect(result).toContain("&"); // intersection
+    expect(result).toContain("|");
     expect(result).toMatch(/title: string/);
     expect(result).toMatch(/count: number/);
   });
 
-  it("ignores calls without a string literal template argument", () => {
+  it("resolves const string template arguments", () => {
     const { checker, sf } = makeTestProgram(
       `declare function render(t: string, d: any): string;\n` +
         `const tmpl = "user";\n` +
         `render(tmpl, { name: "Ben" });`,
     );
     analyzeFileForEtaCalls(sf, checker);
-    // Dynamic template name → not tracked
+    expect(templateDataTypeMap.get("user")).toMatch(/name: string/);
+  });
+
+  it("ignores genuinely dynamic template arguments", () => {
+    const { checker, sf } = makeTestProgram(
+      `declare function render(t: string, d: any): string;\n` +
+        `declare const tmpl: string;\n` +
+        `render(tmpl, { name: "Ben" });`,
+    );
+    analyzeFileForEtaCalls(sf, checker);
     expect(templateDataTypeMap.size).toBe(0);
   });
 
@@ -538,6 +569,7 @@ describe("analyzeFileForEtaCalls", () => {
     const { checker, sf } = makeTestProgram(
       `declare const report: { render(name: string, data: unknown): string };
        report.render("profile", { leaked: true });`,
+      false,
     );
     analyzeFileForEtaCalls(sf, checker);
     expect(templateDataTypeMap.size).toBe(0);
@@ -730,6 +762,12 @@ describe("scanWorkspaceFiles", () => {
     workspaceTsFiles.clear();
     workspaceEtaFiles.clear();
     workspaceProjects.length = 0;
+    templateDataTypeMap.clear();
+    templateDataDefinitionMap.clear();
+    templateLanguageOptionsMap.clear();
+    templateRegistrationMap.clear();
+    templateRelationshipMap.clear();
+    templateResolutionOptionsMap.clear();
   });
 
   it("never includes files from any node_modules directory", () => {
@@ -783,6 +821,107 @@ describe("scanWorkspaceFiles", () => {
     ).toBe(true);
   });
 
+  it("analyzes render calls in files excluded by the workspace tsconfig", () => {
+    const demoRoot = fileURLToPath(new URL("../demo", import.meta.url));
+    const scenarioSource = path.join(
+      demoRoot,
+      "scenarios",
+      "layouts-and-blocks",
+      "src",
+      "index.ts",
+    );
+    const templatePath = path.join(
+      demoRoot,
+      "scenarios",
+      "layouts-and-blocks",
+      "views",
+      "layout-page.eta",
+    );
+
+    scanWorkspaceFiles(demoRoot);
+    expect(
+      [...workspaceTsFiles].some(
+        (fileName) => path.normalize(fileName) === path.normalize(scenarioSource),
+      ),
+    ).toBe(true);
+    expect(
+      workspaceProjects.some((project) =>
+        project.rootNames.some(
+          (fileName) =>
+            path.normalize(fileName) === path.normalize(scenarioSource),
+        ),
+      ),
+    ).toBe(false);
+
+    analyzeWorkspaceFiles(
+      [...workspaceTsFiles],
+      {},
+      workspaceProjects,
+    );
+
+    const pageType = getItTypeForUri(pathToFileURL(templatePath).toString());
+    expect(pageType).not.toBe(DEFAULT_IT_TYPE);
+    expect(pageType).toMatch(/conversionRate: number/);
+  });
+
+  it("preserves project path aliases for excluded render sources", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "eta-inferred-project-"));
+    try {
+      fs.mkdirSync(path.join(root, "src"));
+      fs.mkdirSync(path.join(root, "models"));
+      fs.mkdirSync(path.join(root, "scenarios"));
+      fs.writeFileSync(path.join(root, "src", "index.ts"), "export {};\n");
+      fs.writeFileSync(
+        path.join(root, "models", "page.ts"),
+        "export interface PageData {\n" +
+          "  metrics: { visits: number; conversionRate: number };\n" +
+          "}\n",
+      );
+      fs.writeFileSync(
+        path.join(root, "scenarios", "render.ts"),
+        'import { Eta } from "eta";\n' +
+          'import type { PageData } from "@models/page";\n' +
+          "const eta = new Eta({ views: __dirname });\n" +
+          "const page: PageData = {\n" +
+          "  metrics: { visits: 8420, conversionRate: 0.084 },\n" +
+          "};\n" +
+          'eta.render("aliased-layout", page);\n',
+      );
+      fs.writeFileSync(
+        path.join(root, "scenarios", "aliased-layout.eta"),
+        "<%= it.metrics.visits %>\n",
+      );
+      fs.writeFileSync(
+        path.join(root, "tsconfig.json"),
+        JSON.stringify({
+          compilerOptions: {
+            module: "esnext",
+            moduleResolution: "bundler",
+            baseUrl: ".",
+            paths: { "@models/*": ["models/*"] },
+          },
+          include: ["src/**/*.ts"],
+        }),
+      );
+
+      scanWorkspaceFiles(root);
+      analyzeWorkspaceFiles(
+        [...workspaceTsFiles],
+        {},
+        workspaceProjects,
+      );
+
+      const templateUri = pathToFileURL(
+        path.join(root, "scenarios", "aliased-layout.eta"),
+      ).toString();
+      const inferredType = getItTypeForUri(templateUri);
+      expect(inferredType).not.toBe(DEFAULT_IT_TYPE);
+      expect(inferredType).toMatch(/visits: number/);
+      expect(inferredType).toMatch(/conversionRate: number/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── greeting vs dashboard regression ─────────────────────────────────────────

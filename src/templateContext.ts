@@ -1,12 +1,17 @@
 import * as path from "node:path";
+import ts from "typescript";
 import { EtaLanguageOptions } from "./etaConfig";
-import { findEtaTagRanges } from "./etaScanner";
+import { buildVirtualContentBody } from "./virtualDocument";
 
 export interface StringCallContext {
   functionName: string;
   value: string;
   valueStart: number;
   valueEnd: number;
+}
+
+interface ParsedStringCallContext extends StringCallContext {
+  argumentCount: number;
 }
 
 const PATH_HELPERS = new Set(["include", "includeAsync", "layout"]);
@@ -16,27 +21,51 @@ function findStringCallContexts(
   source: string,
   options: EtaLanguageOptions,
   helperNames: Set<string>,
-): StringCallContext[] {
-  const contexts: StringCallContext[] = [];
-  for (const range of findEtaTagRanges(source, options)) {
-    const content = source.slice(range.contentStart, range.end);
-    const pattern = /\b([A-Za-z_$][\w$]*)\s*\(\s*(["'`])([^"'`]*)\2/g;
-    for (const match of content.matchAll(pattern)) {
-      const functionName = match[1];
-      if (!helperNames.has(functionName)) continue;
-      const whole = match[0];
-      const value = match[3];
-      const valueOffset = whole.indexOf(value, whole.indexOf(match[2]) + 1);
-      const valueStart = range.contentStart + (match.index ?? 0) + valueOffset;
-      contexts.push({
-        functionName,
-        value,
-        valueStart,
-        valueEnd: valueStart + value.length,
-      });
+): ParsedStringCallContext[] {
+  const virtualSource = buildVirtualContentBody(source, options);
+  const sourceFile = ts.createSourceFile(
+    "eta-template.ts",
+    virtualSource,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const contexts: ParsedStringCallContext[] = [];
+
+  function visit(node: ts.Node): void {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      helperNames.has(node.expression.text)
+    ) {
+      const argument = node.arguments[0];
+      if (
+        argument &&
+        (ts.isStringLiteral(argument) ||
+          ts.isNoSubstitutionTemplateLiteral(argument))
+      ) {
+        const literalStart = argument.getStart(sourceFile);
+        const literalEnd = argument.getEnd();
+        const quote = virtualSource[literalStart];
+        const hasClosingQuote = virtualSource[literalEnd - 1] === quote;
+        const valueStart = literalStart + 1;
+        const valueEnd = hasClosingQuote ? literalEnd - 1 : literalEnd;
+        contexts.push({
+          functionName: node.expression.text,
+          value: source.slice(valueStart, valueEnd),
+          valueStart,
+          valueEnd,
+          argumentCount: node.arguments.length,
+        });
+      }
     }
+    ts.forEachChild(node, visit);
   }
-  return contexts;
+
+  visit(sourceFile);
+  return contexts.sort(
+    (left, right) => left.valueStart - right.valueStart,
+  );
 }
 
 export function getTemplatePathContextAtOffset(
@@ -44,26 +73,9 @@ export function getTemplatePathContextAtOffset(
   offset: number,
   options: EtaLanguageOptions,
 ): StringCallContext | undefined {
-  const completed = findStringCallContexts(source, options, PATH_HELPERS).find(
+  return findStringCallContexts(source, options, PATH_HELPERS).find(
     (context) => offset >= context.valueStart && offset <= context.valueEnd,
   );
-  if (completed) return completed;
-
-  const range = findEtaTagRanges(source, options).find(
-    (tag) => offset >= tag.contentStart && offset <= tag.end,
-  );
-  if (!range) return undefined;
-  const prefix = source.slice(range.contentStart, offset);
-  const match =
-    /\b(include|includeAsync|layout)\s*\(\s*(["'`])([^"'`]*)$/.exec(prefix);
-  if (!match) return undefined;
-  const value = match[3];
-  return {
-    functionName: match[1],
-    value,
-    valueStart: offset - value.length,
-    valueEnd: offset,
-  };
 }
 
 export interface BlockCallContext extends StringCallContext {
@@ -74,13 +86,12 @@ export function getBlockCallContexts(
   source: string,
   options: EtaLanguageOptions,
 ): BlockCallContext[] {
-  return findStringCallContexts(source, options, BLOCK_HELPERS).map((context) => {
-    const afterName = source.slice(context.valueEnd + 1, context.valueEnd + 200);
-    return {
+  return findStringCallContexts(source, options, BLOCK_HELPERS).map(
+    ({ argumentCount, ...context }) => ({
       ...context,
-      declaration: /^\s*,/.test(afterName),
-    };
-  });
+      declaration: argumentCount > 1,
+    }),
+  );
 }
 
 export function getBlockCallContextAtOffset(
@@ -108,6 +119,7 @@ export function getTemplatePathCompletions(
   partial: string,
   templateFiles: Iterable<string>,
   views?: string,
+  registeredTemplates: Iterable<string> = [],
 ): string[] {
   const currentDirectory = path.dirname(currentFile);
   const baseDirectory =
@@ -125,5 +137,12 @@ export function getTemplatePathCompletions(
       return relative;
     })
     .filter((value) => value.startsWith(normalizedPartial));
-  return [...new Set(values)].sort(compareStrings);
+  return [
+    ...new Set([
+      ...values,
+      ...[...registeredTemplates].filter((value) =>
+        value.startsWith(normalizedPartial),
+      ),
+    ]),
+  ].sort(compareStrings);
 }

@@ -8,6 +8,7 @@ import {
   buildVirtualDocument,
   buildVirtualLine,
 } from "../src/virtualDocument";
+import { DEFAULT_ETA_LANGUAGE_OPTIONS } from "../src/etaConfig";
 import { positionToOffset } from "../src/position";
 
 interface VirtualQuickInfoResult {
@@ -187,9 +188,9 @@ describe("buildVirtualContent", () => {
     expect(lines[PREAMBLE_LINE_COUNT]).toBe(buildVirtualLine(source));
   });
 
-  it("includes 'declare const it' in the preamble", () => {
+  it("includes the typed template data parameter in the preamble", () => {
     const vc = buildVirtualContent("");
-    expect(vc).toContain("declare const it:");
+    expect(vc).toContain("function __etaTemplate(it: Record<string, any>");
   });
 
   it("includes all Eta builtin declarations in the preamble", () => {
@@ -204,7 +205,7 @@ describe("buildVirtualContent", () => {
       "capture",
       "captureAsync",
     ]) {
-      expect(vc).toContain(`declare function ${name}`);
+      expect(vc).toContain(`const ${name} = undefined as unknown as`);
     }
   });
 
@@ -255,8 +256,27 @@ describe("buildVirtualContent", () => {
     const vc = buildVirtualContent(source, "{ name: string }", options);
     const lines = vc.split("\n");
 
-    expect(lines[0]).toBe("declare const data: { name: string };");
+    expect(lines[0]).toContain(
+      "function __etaTemplate(data: { name: string }",
+    );
     expect(lines[PREAMBLE_LINE_COUNT]).toContain("data.name");
+  });
+
+  it("keeps custom tag content marked as JavaScript", () => {
+    const source = "<%@ const value = 1; %><%= value %>";
+    const options = {
+      ...DEFAULT_ETA_LANGUAGE_OPTIONS,
+      customTagTypes: { "@": "javascript" as const },
+    };
+    const virtual = buildVirtualDocument(source, DEFAULT_IT_TYPE, options);
+    const service = createVirtualLanguageService(
+      "custom-tag.ts",
+      virtual.content,
+    );
+
+    expect(virtual.content).toContain("const value = 1;");
+    expect(service.getSyntacticDiagnostics("custom-tag.ts")).toEqual([]);
+    expect(service.getSemanticDiagnostics("custom-tag.ts")).toEqual([]);
   });
 
   it("masks configured custom tag content instead of sending it to TypeScript", () => {
@@ -283,10 +303,13 @@ describe("PREAMBLE_LINE_COUNT", () => {
     expect(PREAMBLE_LINE_COUNT).toBe(9);
   });
 
-  it("matches the actual newline count in the preamble string", () => {
-    const vc = buildVirtualContent("x");
-    const preambleLines = vc.split("\n").slice(0, PREAMBLE_LINE_COUNT);
-    expect(preambleLines.every((l) => l.startsWith("declare"))).toBe(true);
+  it("matches the actual fixed preamble shape", () => {
+    const preambleLines = buildPreamble(DEFAULT_IT_TYPE).trimEnd().split("\n");
+    expect(preambleLines).toHaveLength(PREAMBLE_LINE_COUNT);
+    expect(preambleLines[0]).toContain("function __etaTemplate");
+    expect(
+      preambleLines.slice(1).every((line) => line.startsWith("const ")),
+    ).toBe(true);
   });
 });
 
@@ -301,10 +324,10 @@ describe("DEFAULT_IT_TYPE", () => {
 // ── buildPreamble ────────────────────────────────────────────────────────────────
 
 describe("buildPreamble", () => {
-  it("uses the provided it type on line 1", () => {
+  it("uses the provided it type in the function parameter", () => {
     const p = buildPreamble("{ name: string; age: number }");
-    expect(p.split("\n")[0]).toBe(
-      "declare const it: { name: string; age: number };",
+    expect(p.split("\n")[0]).toContain(
+      "function __etaTemplate(it: { name: string; age: number }",
     );
   });
 
@@ -323,7 +346,7 @@ describe("buildPreamble", () => {
 
   it("falls back gracefully with DEFAULT_IT_TYPE", () => {
     const p = buildPreamble(DEFAULT_IT_TYPE);
-    expect(p).toContain("declare const it: Record<string, any>;");
+    expect(p).toContain("function __etaTemplate(it: Record<string, any>");
   });
 
   it("uses only the configured custom varName", () => {
@@ -336,10 +359,10 @@ describe("buildPreamble", () => {
       functionHeader: "",
     });
 
-    expect(p.split("\n")[0]).toBe(
-      "declare const data: { name: string };",
+    expect(p.split("\n")[0]).toContain(
+      "function __etaTemplate(data: { name: string }",
     );
-    expect(p).not.toContain("declare const it:");
+    expect(p).not.toContain("function __etaTemplate(it:");
   });
 
   it("declares top-level fields for useWith", () => {
@@ -352,12 +375,7 @@ describe("buildPreamble", () => {
       functionHeader: "",
     });
 
-    expect(p.split("\n")[0]).toContain(
-      'declare const name: typeof it["name"];',
-    );
-    expect(p.split("\n")[0]).toContain(
-      'declare const age: typeof it["age"];',
-    );
+    expect(p.split("\n")[0]).toContain("const { name, age } = it;");
   });
 
   it("preserves multiline functionHeader JavaScript and reports its line offset", () => {
@@ -372,7 +390,7 @@ describe("buildPreamble", () => {
     const virtual = buildVirtualDocument("<%= helper() %>", "{ value: number }", options);
 
     expect(virtual.content).toContain(
-      "// helper comment\nconst helper = () => 1;\ndeclare const it:",
+      "// helper comment\nconst helper = () => 1;\n",
     );
     expect(virtual.preambleLineCount).toBe(PREAMBLE_LINE_COUNT + 2);
     expect(virtual.content.split("\n")[virtual.preambleLineCount]).toContain(
@@ -391,8 +409,8 @@ describe("buildPreamble", () => {
       outputFunctionName: "print",
     });
 
-    expect(p).toContain("declare function print");
-    expect(p).not.toContain("declare function output");
+    expect(p).toContain("const print = undefined as unknown as");
+    expect(p).not.toContain("const output = undefined as unknown as");
   });
 
   it("includes all Eta builtin declarations", () => {
@@ -408,27 +426,42 @@ describe("buildPreamble", () => {
       "capture",
       "captureAsync",
     ]) {
-      expect(p).toContain(`declare function ${name}`);
+      expect(p).toContain(`const ${name} = undefined as unknown as`);
     }
   });
 
   it("allows Eta output helpers to coerce arbitrary values", () => {
     const p = buildPreamble(DEFAULT_IT_TYPE);
-    expect(p).toContain("declare function output(content: unknown): void;");
+    expect(p).toContain("(content: unknown) => void");
   });
+  it("models async Eta templates as async functions", () => {
+    const virtual = buildVirtualDocument(
+      '<% await includeAsync("./partial") %>',
+      DEFAULT_IT_TYPE,
+      { ...DEFAULT_ETA_LANGUAGE_OPTIONS, async: true },
+    );
+    const service = createVirtualLanguageService("async-template.ts", virtual.content);
+
+    expect(virtual.content).toContain("async function __etaTemplate");
+    expect(service.getSyntacticDiagnostics("async-template.ts")).toEqual([]);
+    expect(service.getSemanticDiagnostics("async-template.ts")).toEqual([]);
+  });
+
 });
 
 // ── buildVirtualContent with custom itType ───────────────────────────────────────
 
 describe("buildVirtualContent (with itType)", () => {
-  it("uses the custom it type in the first preamble line", () => {
+  it("uses the custom it type in the function parameter", () => {
     const vc = buildVirtualContent("<%= it.name %>", "{ name: string }");
-    expect(vc.split("\n")[0]).toBe("declare const it: { name: string };");
+    expect(vc.split("\n")[0]).toContain(
+      "function __etaTemplate(it: { name: string }",
+    );
   });
 
   it("falls back to DEFAULT_IT_TYPE when no itType given", () => {
     const vc = buildVirtualContent("");
-    expect(vc).toContain("declare const it: Record<string, any>;");
+    expect(vc).toContain("function __etaTemplate(it: Record<string, any>");
   });
 
   it("still has exactly PREAMBLE_LINE_COUNT lines before template content", () => {

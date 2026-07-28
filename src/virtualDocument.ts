@@ -15,14 +15,14 @@ export const DEFAULT_IT_TYPE = "Record<string, any>";
 function buildEtaBuiltins(options: EtaLanguageOptions): string {
   const outputFunctionName = options.outputFunctionName || "output";
   return [
-    `declare function include(path: string, data?: Record<string, unknown>): string;`,
-    `declare function includeAsync(path: string, data?: Record<string, unknown>): Promise<string>;`,
-    `declare function layout(path: string, data?: Record<string, unknown>): void;`,
-    `declare function block(name: string, fn?: () => void): string;`,
-    `declare function blockAsync(name: string, fn?: () => Promise<void>): Promise<string>;`,
-    `declare function ${outputFunctionName}(content: unknown): void;`,
-    `declare function capture(fn: () => void): string;`,
-    `declare function captureAsync(fn: () => Promise<void>): Promise<string>;`,
+    "const include = undefined as unknown as (path: string, data?: Record<string, unknown>) => string;",
+    "const includeAsync = undefined as unknown as (path: string, data?: Record<string, unknown>) => Promise<string>;",
+    "const layout = undefined as unknown as (path: string, data?: Record<string, unknown>) => void;",
+    "const block = undefined as unknown as (name: string, fn?: () => void) => string;",
+    "const blockAsync = undefined as unknown as (name: string, fn?: () => Promise<void>) => Promise<string>;",
+    `const ${outputFunctionName} = undefined as unknown as (content: unknown) => void;`,
+    "const capture = undefined as unknown as (fn: () => void) => string;",
+    "const captureAsync = undefined as unknown as (fn: () => Promise<void>) => Promise<string>;",
   ].join("\n");
 }
 
@@ -57,24 +57,22 @@ function getTopLevelPropertyNames(type: string): string[] {
   return [...names];
 }
 
-function buildDataDeclaration(
+function buildTemplateFunctionStart(
   itType: string,
   options: EtaLanguageOptions,
 ): string {
   const safeType = singleLine(itType);
-  const declarations = [`declare const ${options.varName}: ${safeType};`];
-
-
-  if (options.useWith) {
-    for (const prop of getTopLevelPropertyNames(safeType)) {
-      declarations.push(
-        `declare const ${prop}: typeof ${options.varName}["${prop}"];`,
-      );
-    }
-  }
-
-
-  return declarations.join(" ");
+  const asyncPrefix = options.async ? "async " : "";
+  const returnType = options.async ? "Promise<void>" : "void";
+  const withBindings = options.useWith
+    ? ` const { ${getTopLevelPropertyNames(safeType).join(", ")} } = ${options.varName};`
+    : "";
+  return (
+    "type __EtaOverride<Base, Override> = Base extends unknown ? Omit<Base, keyof Override> & Override : never; " +
+    `${asyncPrefix}function __etaTemplate(${options.varName}: ${safeType}, ` +
+    "options: Readonly<{ filepath?: string; async?: boolean }> & " +
+    `Record<string, unknown>): ${returnType} {${withBindings}`
+  );
 }
 
 export function buildPreamble(
@@ -88,7 +86,7 @@ export function buildPreamble(
       ? normalizedHeader
       : `${normalizedHeader}\n`;
   }
-  return `${header}${buildDataDeclaration(itType, options)}\n${buildEtaBuiltins(options)}\n`;
+  return `${buildTemplateFunctionStart(itType, options)}\n${buildEtaBuiltins(options)}\n${header}`;
 }
 
 /** Default preamble size retained for consumers using default Eta options. */
@@ -97,6 +95,7 @@ export const PREAMBLE_LINE_COUNT = 9;
 export interface VirtualDocument {
   content: string;
   preambleLineCount: number;
+  bodyOffset: number;
 }
 
 export function buildVirtualDocument(
@@ -107,10 +106,28 @@ export function buildVirtualDocument(
   const preamble = buildPreamble(itType, options);
   return {
     content:
-      preamble +
-      buildVirtualContentBody(etaSource, options) +
-      "\nexport {};",
+      preamble + buildVirtualContentBody(etaSource, options) + "\n}\nexport {};\n",
     preambleLineCount: preamble.split("\n").length - 1,
+    bodyOffset: preamble.length,
+  };
+}
+export function buildRuntimeVirtualDocument(
+  etaSource: string,
+  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
+): VirtualDocument {
+  const normalizedHeader = options.functionHeader.replaceAll("\r\n", "\n");
+  const header =
+    normalizedHeader && !normalizedHeader.endsWith("\n")
+      ? `${normalizedHeader}\n`
+      : normalizedHeader;
+  const preamble =
+    `${options.async ? "async " : ""}function __etaTemplate(${options.varName}, options) {\n` +
+    "\n".repeat(PREAMBLE_LINE_COUNT - 1) +
+    header;
+  return {
+    content: preamble + buildVirtualContentBody(etaSource, options) + "\n}\n",
+    preambleLineCount: preamble.split("\n").length - 1,
+    bodyOffset: preamble.length,
   };
 }
 
@@ -138,14 +155,18 @@ function maskNonNewlineContent(value: string): string {
   return value.replace(/[^\n]/g, " ");
 }
 
-function shouldTerminateExpressionTag(
+function shouldTerminateJavaScriptTag(
   prefix: string,
   options: EtaLanguageOptions,
 ): boolean {
-  return prefix === options.parse.interpolate || prefix === options.parse.raw;
+  return (
+    prefix === options.parse.exec ||
+    prefix === options.parse.interpolate ||
+    prefix === options.parse.raw
+  );
 }
 
-function terminateExpressionTag(js: string): string {
+function terminateJavaScriptTag(js: string): string {
   for (let i = js.length - 1; i >= 0; i--) {
     if (js[i] === " ") {
       return js.slice(0, i) + ";" + js.slice(i + 1);
@@ -160,7 +181,7 @@ function consumeVirtualTag(
   options: EtaLanguageOptions,
 ): TagContentChunk {
   const opener = consumeTagOpener(source, start, options);
-  const terminateTag = shouldTerminateExpressionTag(opener.prefix, options);
+  const terminateTag = shouldTerminateJavaScriptTag(opener.prefix, options);
   let js = " ".repeat(opener.padLen);
   let cursor = opener.next;
 
@@ -169,7 +190,7 @@ function consumeVirtualTag(
     js += opener.contentIsJs ? content.js : maskNonNewlineContent(content.js);
     if (isClosedTagContent(source, cursor, content.next, options)) {
       return {
-        js: terminateTag ? terminateExpressionTag(js) : js,
+        js: terminateTag ? terminateJavaScriptTag(js) : js,
         next: content.next,
       };
     }
@@ -179,7 +200,7 @@ function consumeVirtualTag(
   return { js, next: cursor };
 }
 
-function buildVirtualContentBody(
+export function buildVirtualContentBody(
   source: string,
   options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
 ): string {

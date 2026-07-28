@@ -76,7 +76,7 @@
   },
   "Block async": {
     "prefix": "blockasync",
-    "body": "<% blockAsync(\"${1:blockname}\", async () => { %>\n\t${2:<%= await someData() %>}\n<% }) %>",
+    "body": "<% await blockAsync(\"${1:blockname}\", async () => { %>\n\t${2:<%= await someData() %>}\n<% }) %>",
     "description": "Define an async block"
   },
   "Render block": {

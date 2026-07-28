@@ -2,7 +2,7 @@
   "name": "eta-language-support",
   "displayName": "Eta IntelliSense",
   "description": "Typed IntelliSense, syntax highlighting, autocomplete, and diagnostics for Eta templates",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "ShadowNine",
   "license": "MIT",
   "repository": {
@@ -33,10 +33,14 @@
     "@types/vscode": "^1.120.0",
     "@vitest/coverage-v8": "4.1.6",
     "@vitest/ui": "^4.1.6",
+    "@vscode/test-electron": "^3.1.0",
     "eta": "^4.6.0",
     "tsdown": "^0.22.14",
     "typescript": "^6.0.3",
-    "vitest": "^4.1.6"
+    "vitest": "^4.1.6",
+    "vscode-jsonrpc": "^9.0.1",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
   },
   "scripts": {
     "vscode:prepublish": "bun run compile",
@@ -46,6 +50,7 @@
     "test": "vitest run",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",
+    "test:vscode": "bun run compile && bun scripts/runVscodeTests.ts",
     "pretest": "bun run compile"
   },
   "contributes": {
@@ -66,13 +71,33 @@
       {
         "language": "eta",
         "scopeName": "source.eta",
-        "path": "./syntaxes/eta.tmLanguage.json"
+        "path": "./syntaxes/eta.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.javascript.eta": "javascript"
+        }
+      },
+      {
+        "scopeName": "source.eta.injection",
+        "path": "./syntaxes/eta-injection.tmLanguage.json",
+        "injectTo": [
+          "source.eta",
+          "text.html.basic"
+        ],
+        "embeddedLanguages": {
+          "meta.embedded.block.javascript.eta": "javascript"
+        }
       }
     ],
     "snippets": [
       {
         "language": "eta",
         "path": "./snippets/eta.json"
+      }
+    ],
+    "jsonValidation": [
+      {
+        "fileMatch": ".eta-language-support.json",
+        "url": "./schemas/eta-language-support.schema.json"
       }
     ],
     "configuration": {
@@ -111,6 +136,18 @@
           },
           "description": "Custom Eta tag prefixes. Eta runtime customTags are handler functions; list only their prefixes here for language support."
         },
+        "eta.customTagTypes": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "enum": [
+              "javascript",
+              "text"
+            ]
+          },
+          "description": "Safe language metadata for custom tag prefixes. Mark a prefix as 'javascript' only when its handler receives JavaScript expression or statement content; handlers are never executed by the extension."
+        },
         "eta.varName": {
           "type": "string",
           "default": "it",
@@ -130,6 +167,70 @@
           "type": "string",
           "default": "output",
           "description": "Name of the Eta output helper function."
+        },
+        "eta.async": {
+          "type": "boolean",
+          "default": false,
+          "description": "Compile and model Eta templates as async functions."
+        },
+        "eta.autoEscape": {
+          "type": "boolean",
+          "default": true,
+          "description": "Mirror Eta's automatic XML-escaping option for language modeling."
+        },
+        "eta.autoFilter": {
+          "type": "boolean",
+          "default": false,
+          "description": "Mirror Eta's automatic interpolation filter option for language modeling."
+        },
+        "eta.autoTrim": {
+          "default": [
+            false,
+            "nl"
+          ],
+          "anyOf": [
+            {
+              "type": "boolean",
+              "enum": [
+                false
+              ]
+            },
+            {
+              "type": "string",
+              "enum": [
+                "nl",
+                "slurp"
+              ]
+            },
+            {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "boolean",
+                    "enum": [
+                      false
+                    ]
+                  },
+                  {
+                    "type": "string",
+                    "enum": [
+                      "nl",
+                      "slurp"
+                    ]
+                  }
+                ]
+              }
+            }
+          ],
+          "description": "Mirror Eta's automatic whitespace trimming mode."
+        },
+        "eta.rmWhitespace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Mirror Eta's global whitespace removal option."
         }
       }
     }

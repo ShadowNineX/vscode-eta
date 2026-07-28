@@ -7,9 +7,7 @@ import {
   TransportKind,
 } from "vscode-languageclient/node";
 import { createExtensionLogger, type EtaLogger } from "./logging";
-import { findEtaTagRanges } from "./etaScanner";
 import {
-  DEFAULT_ETA_LANGUAGE_OPTIONS,
   EtaLanguageOptions,
   normalizeEtaLanguageOptions,
 } from "./etaConfig";
@@ -17,171 +15,6 @@ import {
 let client: LanguageClient;
 let log: vscode.LogOutputChannel;
 let logger: EtaLogger;
-
-// Define built-in Eta functions and helpers
-const ETA_BUILTINS: { [key: string]: any } = {
-  // Template control
-  layout: {
-    label: "layout",
-    kind: vscode.CompletionItemKind.Function,
-    detail: "Set parent layout",
-    documentation:
-      'Sets a parent layout for the current template.\n\nUsage: layout("./layoutPath")\nor\nlayout("./layoutPath", { data })',
-    insertText: 'layout("${1:./layout}"${2:, { ${3:title: "value"} }})$0',
-  },
-  include: {
-    label: "include",
-    kind: vscode.CompletionItemKind.Function,
-    detail: "Include a partial template",
-    documentation:
-      'Renders a partial template inline.\n\nUsage: include("./partialPath")\nor\ninclude("./partialPath", { data })',
-    insertText: 'include("${1:./partial}"${2:, { ${3:data}} })$0',
-  },
-  includeAsync: {
-    label: "includeAsync",
-    kind: vscode.CompletionItemKind.Function,
-    detail: "Include an async partial template",
-    documentation:
-      'Renders an async partial template inline.\n\nUsage: await includeAsync("./partialPath")',
-    insertText: 'await includeAsync("${1:./partial}")$0',
-  },
-  block: {
-    label: "block",
-    kind: vscode.CompletionItemKind.Function,
-    detail: "Define or render a named block",
-    documentation:
-      'Define a named block in child template or render in layout.\n\nDefine: block("name", () => { /* content */ })\nRender: block("name")\nRender with fallback: block("name", () => { /* fallback */ })',
-    insertText:
-      'block("${1:blockname}"${2:, () => { %>\\n\\t${3:content}\\n<% }})$0',
-  },
-  blockAsync: {
-    label: "blockAsync",
-    kind: vscode.CompletionItemKind.Function,
-    detail: "Define or render an async block",
-    documentation:
-      "Async version of block() for operations that need to await.",
-    insertText:
-      'blockAsync("${1:blockname}", async () => { %>\\n\\t${2:content}\\n<% })$0',
-  },
-  output: {
-    label: "output",
-    kind: vscode.CompletionItemKind.Function,
-    detail: "Append string to output",
-    documentation:
-      'Directly appends a string to template output. Useful in loops or conditionals.\n\nUsage: output("<content>")',
-    insertText: 'output("${1:content}")$0',
-  },
-  capture: {
-    label: "capture",
-    kind: vscode.CompletionItemKind.Function,
-    detail: "Capture template output as string",
-    documentation:
-      "Executes template code and returns output as string instead of writing to output.\n\nUsage: const result = capture(() => { /* template code */ })",
-    insertText: "capture(() => { %>\\n\\t${1:content}\\n<% })$0",
-  },
-  captureAsync: {
-    label: "captureAsync",
-    kind: vscode.CompletionItemKind.Function,
-    detail: "Capture async template output as string",
-    documentation: "Async version of capture() for use with renderAsync.",
-    insertText:
-      "await captureAsync(async () => { %>\\n\\t${1:content}\\n<% })$0",
-  },
-  // Data reference
-  it: {
-    label: "it",
-    kind: vscode.CompletionItemKind.Variable,
-    detail: "Template data object",
-    documentation:
-      "The global variable containing template data.\n\nAccess properties via it.propertyName\nExample: it.title, it.user.name",
-  },
-};
-
-function getEtaBuiltins(options: EtaLanguageOptions): { [key: string]: any } {
-  const outputFunctionName = options.outputFunctionName ?? "output";
-  const builtins = { ...ETA_BUILTINS };
-  if (outputFunctionName !== "output") {
-    delete builtins.output;
-    builtins[outputFunctionName] = {
-      ...ETA_BUILTINS.output,
-      label: outputFunctionName,
-      insertText: `${outputFunctionName}("\${1:content}")$0`,
-    };
-  }
-  if (options.varName !== "it") {
-    delete builtins.it;
-    builtins[options.varName] = {
-      ...ETA_BUILTINS.it,
-      label: options.varName,
-    };
-  }
-  return builtins;
-}
-
-interface TagTypeInfo {
-  name: string;
-  desc: string;
-}
-
-function getTagTypes(options: EtaLanguageOptions): Record<string, TagTypeInfo> {
-  const [open] = options.tags;
-  const entries: Array<[string, TagTypeInfo]> = [
-    [open, { name: "execute", desc: "Execute JavaScript" }],
-    [
-      `${open}${options.parse.interpolate}`,
-      { name: "output-escaped", desc: "Output escaped value" },
-    ],
-    [
-      `${open}${options.parse.raw}`,
-      { name: "output-raw", desc: "Output raw HTML" },
-    ],
-    ...options.customTags.map(
-      (prefix): [string, TagTypeInfo] => [
-        `${open}${prefix}`,
-        { name: "custom-tag", desc: "Custom tag (user-configured)" },
-      ],
-    ),
-    [
-      `${open}-`,
-      {
-        name: "whitespace-trim",
-        desc: "Execute + trim 1 newline before tag",
-      },
-    ],
-    [
-      `${open}_`,
-      {
-        name: "whitespace-trim",
-        desc: "Execute + trim all whitespace before tag",
-      },
-    ],
-  ];
-
-  return Object.fromEntries(
-    entries.filter(([tag]) => tag.length > open.length),
-  );
-}
-
-function positionToOffset(text: string, line: number, character: number): number {
-  const lines = text.split("\n");
-  let offset = 0;
-  for (let i = 0; i < line; i++) {
-    offset += (lines[i]?.length ?? 0) + 1;
-  }
-  return offset + character;
-}
-
-function isInsideEtaTag(
-  document: vscode.TextDocument,
-  position: vscode.Position,
-  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
-): boolean {
-  const text = document.getText();
-  const offset = positionToOffset(text, position.line, position.character);
-  return findEtaTagRanges(text, options).some(
-    (range) => offset >= range.contentStart && offset < range.end,
-  );
-}
 
 function getEtaLanguageOptions(): EtaLanguageOptions {
   const config = vscode.workspace.getConfiguration("eta");
@@ -196,226 +29,26 @@ function getEtaLanguageOptions(): EtaLanguageOptions {
       raw: config.get<string>("parse.raw") ?? "~",
     },
     customTags: config.get<string[]>("customTags") ?? [],
+    customTagTypes:
+      config.get<EtaLanguageOptions["customTagTypes"]>("customTagTypes") ?? {},
     varName: config.get<string>("varName") ?? "it",
     useWith: config.get<boolean>("useWith") ?? false,
     functionHeader: config.get<string>("functionHeader") ?? "",
     outputFunctionName: config.get<string>("outputFunctionName") ?? "output",
+    async: config.get<boolean>("async") ?? false,
+    autoEscape: config.get<boolean>("autoEscape") ?? true,
+    autoFilter: config.get<boolean>("autoFilter") ?? false,
+    autoTrim:
+      config.get<EtaLanguageOptions["autoTrim"]>("autoTrim") ?? [false, "nl"],
+    rmWhitespace: config.get<boolean>("rmWhitespace") ?? false,
   });
 }
-
-class EtaCompletionProvider implements vscode.CompletionItemProvider {
-  provideCompletionItems(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-    token: vscode.CancellationToken,
-    context: vscode.CompletionContext,
-  ): vscode.CompletionItem[] {
-    const line = document.lineAt(position).text;
-    const lineUpto = line.substring(0, position.character);
-    const completions: vscode.CompletionItem[] = [];
-
-    // Check if inside Eta tag
-    const options = getEtaLanguageOptions();
-    const inTag = isInsideEtaTag(document, position, options);
-
-    if (inTag) {
-      // Add Eta functions and helpers
-      for (const [, item] of Object.entries(getEtaBuiltins(options))) {
-        const completion = new vscode.CompletionItem(item.label, item.kind);
-        completion.detail = item.detail;
-        completion.documentation = new vscode.MarkdownString(
-          item.documentation || "",
-        );
-        if (item.insertText) {
-          completion.insertText = new vscode.SnippetString(item.insertText);
-        }
-        completions.push(completion);
-      }
-
-      // Add common JavaScript methods/functions
-      const jsCompletions = [
-        {
-          label: "forEach",
-          kind: vscode.CompletionItemKind.Method,
-          doc: "Iterate over array items",
-        },
-        {
-          label: "map",
-          kind: vscode.CompletionItemKind.Method,
-          doc: "Transform array items",
-        },
-        {
-          label: "filter",
-          kind: vscode.CompletionItemKind.Method,
-          doc: "Filter array items",
-        },
-        {
-          label: "reduce",
-          kind: vscode.CompletionItemKind.Method,
-          doc: "Reduce array to single value",
-        },
-        {
-          label: "join",
-          kind: vscode.CompletionItemKind.Method,
-          doc: "Join array to string",
-        },
-        {
-          label: "length",
-          kind: vscode.CompletionItemKind.Property,
-          doc: "Array/string length",
-        },
-        {
-          label: "Object.keys",
-          kind: vscode.CompletionItemKind.Function,
-          doc: "Get object keys",
-        },
-        {
-          label: "Object.values",
-          kind: vscode.CompletionItemKind.Function,
-          doc: "Get object values",
-        },
-        {
-          label: "Object.entries",
-          kind: vscode.CompletionItemKind.Function,
-          doc: "Get object entries",
-        },
-      ];
-
-      for (const jsComp of jsCompletions) {
-        const item = new vscode.CompletionItem(jsComp.label, jsComp.kind);
-        item.detail = jsComp.doc;
-        completions.push(item);
-      }
-    }
-
-    // Tag trigger completions
-    const [open] = options.tags;
-    if (lineUpto.endsWith(open)) {
-      const tagCompletions = [
-        { label: open, insertText: open, detail: "Execute JavaScript" },
-        {
-          label: `${open}${options.parse.interpolate}`,
-          insertText: `${open}${options.parse.interpolate}`,
-          detail: "Output escaped value",
-        },
-        {
-          label: `${open}${options.parse.raw}`,
-          insertText: `${open}${options.parse.raw}`,
-          detail: "Output raw HTML",
-        },
-        ...options.customTags.map((prefix) => ({
-          label: `${open}${prefix}`,
-          insertText: `${open}${prefix}`,
-          detail: "Custom tag (user-configured)",
-        })),
-        {
-          label: `${open}-`,
-          insertText: `${open}-`,
-          detail: "Execute + trim 1 newline before",
-        },
-        {
-          label: `${open}_`,
-          insertText: `${open}_`,
-          detail: "Execute + trim all whitespace before",
-        },
-      ];
-      for (const tag of tagCompletions) {
-        const item = new vscode.CompletionItem(
-          tag.label,
-          vscode.CompletionItemKind.Keyword,
-        );
-        item.detail = tag.detail;
-        item.insertText = tag.insertText;
-        completions.push(item);
-      }
-    }
-
-    return completions;
-  }
-
-  resolveCompletionItem(
-    item: vscode.CompletionItem,
-    token: vscode.CancellationToken,
-  ): vscode.CompletionItem {
-    return item;
-  }
-}
-
-class EtaHoverProvider implements vscode.HoverProvider {
-  provideHover(
-    document: vscode.TextDocument,
-    position: vscode.Position,
-    token: vscode.CancellationToken,
-  ): vscode.Hover | null {
-    const range = document.getWordRangeAtPosition(position);
-    if (!range) {
-      return null;
-    }
-
-    const word = document.getText(range);
-
-    // Check if word is in our builtins
-    const builtins = getEtaBuiltins(getEtaLanguageOptions());
-    if (builtins[word]) {
-      const item = builtins[word];
-      const markdown = new vscode.MarkdownString();
-      markdown.appendMarkdown(`**${item.label}**\n\n`);
-      markdown.appendMarkdown(`${item.detail}\n\n`);
-      markdown.appendMarkdown(`---\n\n`);
-      markdown.appendMarkdown(item.documentation || "");
-      return new vscode.Hover(markdown);
-    }
-
-    // Check if hovering over a tag opener.
-    // Sort longest-first so <%=, <%~, <%# etc. match before the bare <%.
-    const line = document.lineAt(position).text;
-    const sortedTags = Object.entries(getTagTypes(getEtaLanguageOptions())).sort(
-      (a, b) => b[0].length - a[0].length,
-    );
-    for (const [tag, info] of sortedTags) {
-      let idx = line.indexOf(tag);
-      while (idx !== -1) {
-        // Cursor must be within the tag characters themselves (e.g. <, %, =)
-        if (
-          position.character >= idx &&
-          position.character < idx + tag.length
-        ) {
-          const markdown = new vscode.MarkdownString();
-          markdown.appendMarkdown(`**${tag}** - ${info.desc}\n\n`);
-          markdown.appendMarkdown(`Type: \`${info.name}\`\n\n`);
-          return new vscode.Hover(markdown);
-        }
-        idx = line.indexOf(tag, idx + 1);
-      }
-    }
-
-    return null;
-  }
-}
-
 
 export function activate(context: vscode.ExtensionContext): void {
   log = vscode.window.createOutputChannel("Eta", { log: true });
   logger = createExtensionLogger(log);
   context.subscriptions.push(log);
   logger.info("Extension activated");
-
-  // Register completion provider
-  const completionProvider = new EtaCompletionProvider();
-  const hoverProvider = new EtaHoverProvider();
-
-  context.subscriptions.push(
-    vscode.languages.registerCompletionItemProvider(
-      "eta",
-      completionProvider,
-      "<",
-      "{",
-      ".",
-      " ",
-    ),
-    vscode.languages.registerHoverProvider("eta", hoverProvider),
-  );
-
 
   // ── Language Server (JS/TS IntelliSense inside Eta tags) ─────────────────
   const serverModule = context.asAbsolutePath(path.join("out", "server.js"));
@@ -432,9 +65,11 @@ export function activate(context: vscode.ExtensionContext): void {
       configurationSection: "eta",
       // Re-infer data and reload project settings when source/config changes.
       fileEvents: [
-        vscode.workspace.createFileSystemWatcher("**/*.{ts,tsx,js,jsx,eta}"),
         vscode.workspace.createFileSystemWatcher(
-          "**/{tsconfig.json,jsconfig.json}",
+          "**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,eta}",
+        ),
+        vscode.workspace.createFileSystemWatcher(
+          "**/{tsconfig.json,jsconfig.json,.eta-language-support.json}",
         ),
       ],
     },

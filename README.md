@@ -27,6 +27,7 @@
 - ⚡ Eta-helper and template-path completions for includes and layouts.
 - 🧬 Collision-safe template data inference from render calls, includes, and layouts.
 - 🛠 Workspace `tsconfig.json`/`jsconfig.json`, multiple roots, and configurable Eta delimiters, parse prefixes, `customTags`, `varName`, `useWith`, `functionHeader`, and `outputFunctionName`.
+- Generated `.eta-language-support.json` manifests for authoritative runtime-derived configuration, virtual code, data types, diagnostics, template names, and symbol navigation without executing project code in VS Code.
 
 ## 🚀 Quick Taste
 
@@ -98,9 +99,15 @@ Eta is flexible, so the extension can mirror common runtime options through VS C
   "eta.parse.interpolate": ":",
   "eta.parse.raw": "!",
   "eta.customTags": ["#"],
+  "eta.customTagTypes": { "@": "javascript" },
   "eta.varName": "data",
   "eta.useWith": false,
-  "eta.outputFunctionName": "print"
+  "eta.outputFunctionName": "print",
+  "eta.async": true,
+  "eta.autoEscape": true,
+  "eta.autoFilter": false,
+  "eta.autoTrim": [false, "nl"],
+  "eta.rmWhitespace": false
 }
 ```
 
@@ -116,12 +123,35 @@ These settings do not execute your Eta config. They tell the editor how to parse
 | `eta.parse.interpolate` | `=` | Prefix for escaped output tags. |
 | `eta.parse.raw` | `~` | Prefix for raw output tags. |
 | `eta.customTags` | `[]` | Custom tag prefixes handled by your Eta runtime. |
+| `eta.customTagTypes` | `{}` | Declares custom prefixes as `javascript` or opaque `text` without executing plugin code. |
 | `eta.varName` | `it` | Name of the template data variable. |
 | `eta.useWith` | `false` | Exposes top-level data properties as variables. |
 | `eta.functionHeader` | `""` | Extra declarations injected into the virtual template file. |
 | `eta.outputFunctionName` | `output` | Name of the Eta output helper function. |
+| `eta.async` | `false` | Models the template as an async function. |
+| `eta.autoEscape` | `true` | Mirrors Eta's automatic XML-escaping mode. |
+| `eta.autoFilter` | `false` | Mirrors Eta's automatic interpolation-filter mode. |
+| `eta.autoTrim` | `[false, "nl"]` | Mirrors Eta's automatic before/after trim modes. |
+| `eta.rmWhitespace` | `false` | Mirrors Eta's global whitespace-removal mode. |
 
 The language server can also detect simple inline configs like `new Eta({ tags: ["{{", "}}"], varName: "data" })` and `eta.configure({ ... })` near render calls.
+
+### Generated Runtime Manifest
+
+Static analysis cannot resolve values produced by arbitrary application code or Eta plugins. A trusted project build step can bridge those results by writing `.eta-language-support.json` at the workspace root. The extension only validates and reads this file; it never imports the generator, Eta config, application modules, or plugin code.
+
+VS Code validates this filename against [`schemas/eta-language-support.schema.json`](schemas/eta-language-support.schema.json). Manifest version `1` contains:
+
+- `inputs`: every source/config file used to generate the manifest, with a lowercase SHA-256 hash;
+- `templates`: exact template hashes plus normalized Eta options, the structural data type, data-definition locations, resolution settings, related templates, generated diagnostics, and transformed virtual TypeScript;
+- `virtualDocument.mappings`: non-overlapping source-to-virtual offset segments used by completion, hover, diagnostics, definition, references, rename, signature help, and semantic tokens;
+- `templateNames`: runtime-computed names and their resolved template/definition locations;
+- `symbols`: stable cross-file occurrence groups for definitions, references, and rename.
+
+All paths are normalized, workspace-relative POSIX paths. The loader rejects unknown fields, path traversal, symlink escapes, malformed types, invalid or overlapping ranges, unsupported versions, oversized files, and ambiguous symbol ownership. It also verifies every declared input and template hash. If the file is missing, invalid, stale, or does not list the open template, the language server safely falls back to its static analysis for that template.
+
+Generate the file from your own trusted build or development process after the runtime configuration and plugins have produced their final template code. Regenerate it whenever an input or template changes. Do not place secrets or runtime values in the manifest: its contents are ordinary workspace data and may be packaged or committed.
+
 
 ## 📦 Demos
 
@@ -161,6 +191,8 @@ src/
   extension.ts        VS Code extension entrypoint and client-side providers
   server.ts           Language server entrypoint
   etaConfig.ts        Shared Eta language option defaults and normalization
+  etaManifest.ts      Strict generated-manifest loader and source maps
+  semanticTokens.ts   Mapped JavaScript semantic token classification
   etaScanner.ts       Eta tag scanner
   virtualDocument.ts  Eta-to-TypeScript virtual document builder
   typeInference.ts    Workspace render-call analysis and `it` type inference

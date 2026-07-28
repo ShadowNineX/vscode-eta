@@ -7,3 +7,4 @@ dist/
 !snippets/
 coverage/
 .vitest/
+.vscode-test/

@@ -41,7 +41,7 @@ export function consumeTagOpener(
     i++;
   }
   let prefix = i;
-  while (prefix < line.length && /[ \t]/.test(line[prefix])) {
+  while (prefix < line.length && /\s/.test(line[prefix])) {
     prefix++;
   }
 

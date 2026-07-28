@@ -102,6 +102,17 @@ describe("consumeTagOpener", () => {
     expect(r.next).toBe(3);
     expect(r.contentIsJs).toBe(false);
   });
+  it("uses safe metadata to opt custom tag content into JavaScript", () => {
+    const result = consumeTagOpener("<%@ data.name %>", 0, {
+      ...customTagOptions,
+      customTags: [],
+      customTagTypes: { "@": "javascript" },
+    });
+
+    expect(result.prefix).toBe("@");
+    expect(result.contentIsJs).toBe(true);
+  });
+
 });
 
 // ── consumeTagContent ─────────────────────────────────────────────────────────
@@ -151,6 +162,21 @@ describe("consumeTagContent", () => {
     expect(js).toBe("/* %> */ value   ");
     expect(next).toBe(17);
   });
+  it("matches Eta by closing inside regular-expression literals", () => {
+    const source = "const pattern = /a%>[b/]/g; pattern.test(value) %>";
+    const { next } = consumeTagContent(source, 0);
+
+    expect(next).toBe(source.indexOf("%>") + 2);
+  });
+
+  it("still treats division as division before the closing delimiter", () => {
+    const source = "const ratio = 8 / 2; %>";
+    const { js, next } = consumeTagContent(source, 0);
+
+    expect(js).toContain("8 / 2");
+    expect(next).toBe(source.length);
+  });
+
 
   it("closes at a delimiter after // because Eta does not lex line comments", () => {
     const { js, next } = consumeTagContent("// comment %>\nignored", 0);

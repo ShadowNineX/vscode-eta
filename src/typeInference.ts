@@ -10,8 +10,20 @@ import {
 import { buildVirtualDocument, DEFAULT_IT_TYPE } from "./virtualDocument";
 import {
   canonicalTemplatePath,
+  findMostSpecificContainingRoot,
   resolveTemplatePath,
 } from "./templatePaths";
+
+export const WORKSPACE_SCRIPT_EXTENSIONS = [
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+] as const;
 
 /** Absolute fs paths of every .ts/.js file found in the workspace. */
 export const workspaceTsFiles = new Set<string>();
@@ -38,11 +50,22 @@ export const templateResolutionOptionsMap = new Map<
   EtaTemplateResolutionOptions
 >();
 
+export const templateRelationshipMap = new Map<string, Set<string>>();
+
 export interface EtaDataDefinition {
   fileName: string;
   start: number;
   length: number;
 }
+
+interface EtaTemplateRegistration extends EtaDataDefinition {
+  name: string;
+}
+
+export const templateRegistrationMap = new Map<
+  string,
+  EtaTemplateRegistration[]
+>();
 
 /** Maps template basename -> data path -> source declarations. */
 export const templateDataDefinitionMap = new Map<
@@ -95,7 +118,7 @@ export function scanWorkspaceFiles(root: string): void {
   try {
     const sourceFiles = ts.sys.readDirectory(
       root,
-      [".ts", ".tsx", ".js", ".jsx"],
+      [...WORKSPACE_SCRIPT_EXTENSIONS],
       ["node_modules", ".git", "out", "dist", "build"],
     );
     for (const fileName of sourceFiles) {
@@ -161,6 +184,10 @@ function literalTypeToString(type: ts.Type): string | undefined {
   return undefined;
 }
 
+function typePropertyName(name: string): string {
+  return /^[$A-Z_a-z][$\w]*$/.test(name) ? name : JSON.stringify(name);
+}
+
 /** Expands an object/interface type into `{ prop: type; ... }` notation. */
 function expandObjectType(
   checker: ts.TypeChecker,
@@ -184,9 +211,9 @@ function expandObjectType(
         checker.getTypeOfSymbol(prop),
         depth + 1,
       );
-      return `${prop.name}${optional}: ${propStr}`;
+      return `${typePropertyName(prop.name)}${optional}: ${propStr}`;
     } catch {
-      return `${prop.name}${optional}: unknown`;
+      return `${typePropertyName(prop.name)}${optional}: unknown`;
     }
   });
   return `{ ${parts.join("; ")} }`;
@@ -290,10 +317,66 @@ function getStringLiteralValue(expr: ts.Expression): string | undefined {
     : undefined;
 }
 
+function resolveStaticExpression(
+  expression: ts.Expression,
+  checker: ts.TypeChecker,
+  seen = new Set<ts.Symbol>(),
+): ts.Expression {
+  if (
+    ts.isParenthesizedExpression(expression) ||
+    ts.isAsExpression(expression) ||
+    ts.isTypeAssertionExpression(expression) ||
+    ts.isNonNullExpression(expression) ||
+    ts.isSatisfiesExpression(expression)
+  ) {
+    return resolveStaticExpression(expression.expression, checker, seen);
+  }
+
+  const symbolNode = ts.isPropertyAccessExpression(expression)
+    ? expression.name
+    : expression;
+  let symbol = checker.getSymbolAtLocation(symbolNode);
+  if (!symbol || seen.has(symbol)) return expression;
+  seen.add(symbol);
+  if (symbol.flags & ts.SymbolFlags.Alias) {
+    symbol = checker.getAliasedSymbol(symbol);
+  }
+  const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
+  let initializer: ts.Expression | undefined;
+  if (
+    declaration &&
+    (ts.isVariableDeclaration(declaration) ||
+      ts.isPropertyDeclaration(declaration) ||
+      ts.isPropertyAssignment(declaration) ||
+      ts.isParameter(declaration))
+  ) {
+    initializer = declaration.initializer;
+  } else if (declaration && ts.isShorthandPropertyAssignment(declaration)) {
+    const valueSymbol = checker.getShorthandAssignmentValueSymbol(declaration);
+    const valueDeclaration =
+      valueSymbol?.valueDeclaration ?? valueSymbol?.declarations?.[0];
+    if (valueDeclaration && ts.isVariableDeclaration(valueDeclaration)) {
+      initializer = valueDeclaration.initializer;
+    }
+  }
+  return initializer
+    ? resolveStaticExpression(initializer, checker, seen)
+    : expression;
+}
+
 function getStaticPathValue(
   expr: ts.Expression,
   sourceFile: ts.SourceFile,
+  checker?: ts.TypeChecker,
 ): string | undefined {
+  const resolved = checker ? resolveStaticExpression(expr, checker) : expr;
+  if (resolved !== expr) {
+    return getStaticPathValue(
+      resolved,
+      resolved.getSourceFile(),
+      checker,
+    );
+  }
   const literal = getStringLiteralValue(expr);
   if (literal !== undefined) {
     return path.isAbsolute(literal)
@@ -317,7 +400,7 @@ function getStaticPathValue(
       expr.expression.name.text === "resolve")
   ) {
     const parts = expr.arguments.map((argument) =>
-      getStaticPathValue(argument, sourceFile),
+      getStaticPathValue(argument, sourceFile, checker),
     );
     if (parts.includes(undefined)) return undefined;
     return path.resolve(...(parts as string[]));
@@ -394,6 +477,29 @@ function getBooleanProperty(
   return value ? getBooleanLiteralValue(value) : undefined;
 }
 
+function getTrimModeLiteralValue(
+  expression: ts.Expression,
+): "nl" | "slurp" | false | undefined {
+  if (expression.kind === ts.SyntaxKind.FalseKeyword) return false;
+  const value = getStringLiteralValue(expression);
+  return value === "nl" || value === "slurp" ? value : undefined;
+}
+
+function getAutoTrimConfig(
+  object: ts.ObjectLiteralExpression,
+): EtaLanguageOptions["autoTrim"] {
+  const value = getObjectProperty(object, "autoTrim");
+  if (!value) return undefined;
+  if (ts.isArrayLiteralExpression(value) && value.elements.length >= 2) {
+    const before = getTrimModeLiteralValue(value.elements[0] as ts.Expression);
+    const after = getTrimModeLiteralValue(value.elements[1] as ts.Expression);
+    return before !== undefined && after !== undefined
+      ? [before, after]
+      : undefined;
+  }
+  return getTrimModeLiteralValue(value);
+}
+
 function getEtaConfigFromObjectLiteral(
   object: ts.ObjectLiteralExpression,
 ): Partial<EtaLanguageOptions> {
@@ -419,14 +525,22 @@ function getEtaConfigFromObjectLiteral(
 
   config.outputFunctionName = getStringProperty(object, "outputFunctionName");
 
+  config.async = getBooleanProperty(object, "async");
+  config.autoEscape = getBooleanProperty(object, "autoEscape");
+  config.autoFilter = getBooleanProperty(object, "autoFilter");
+  config.autoTrim = getAutoTrimConfig(object);
+  config.rmWhitespace = getBooleanProperty(object, "rmWhitespace");
+
   return config;
 }
 
 function getEtaInstanceConfigFromExpression(
   expr: ts.Expression | undefined,
-  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
 ): EtaInstanceConfig {
-  const object = expr && ts.isObjectLiteralExpression(expr) ? expr : undefined;
+  const resolved = expr ? resolveStaticExpression(expr, checker) : undefined;
+  const object =
+    resolved && ts.isObjectLiteralExpression(resolved) ? resolved : undefined;
   const viewsExpression = object
     ? getObjectProperty(object, "views")
     : undefined;
@@ -435,49 +549,98 @@ function getEtaInstanceConfigFromExpression(
       ? normalizeEtaLanguageOptions(getEtaConfigFromObjectLiteral(object))
       : DEFAULT_ETA_LANGUAGE_OPTIONS,
     views: viewsExpression
-      ? getStaticPathValue(viewsExpression, sourceFile)
+      ? getStaticPathValue(viewsExpression, viewsExpression.getSourceFile(), checker)
       : undefined,
     defaultExtension:
       (object && getStringProperty(object, "defaultExtension")) || ".eta",
   };
 }
 
-function symbolComesFromEta(
-  node: ts.Node,
-  checker: ts.TypeChecker,
-): boolean {
-  let symbol = checker.getSymbolAtLocation(node);
-  if (!symbol) return false;
-  if (symbol.flags & ts.SymbolFlags.Alias) {
-    symbol = checker.getAliasedSymbol(symbol);
-  }
-  return (symbol.declarations ?? []).some((declaration) => {
-    let current: ts.Node | undefined = declaration;
-    while (current && !ts.isImportDeclaration(current)) current = current.parent;
+function declarationComesFromEta(declaration: ts.Declaration): boolean {
+  const normalizedFileName = declaration
+    .getSourceFile()
+    .fileName.replaceAll("\\", "/");
+  if (normalizedFileName.includes("/node_modules/eta/")) return true;
+
+  let current: ts.Node | undefined = declaration;
+  while (current) {
     if (
-      current &&
+      (ts.isImportDeclaration(current) ||
+        ts.isExportDeclaration(current)) &&
+      current.moduleSpecifier &&
       ts.isStringLiteral(current.moduleSpecifier) &&
       current.moduleSpecifier.text === "eta"
     ) {
       return true;
     }
-    return declaration
-      .getSourceFile()
-      .fileName.replaceAll("\\", "/")
-      .includes("/node_modules/eta/");
-  });
+    if (
+      ts.isImportEqualsDeclaration(current) &&
+      ts.isExternalModuleReference(current.moduleReference) &&
+      current.moduleReference.expression &&
+      ts.isStringLiteral(current.moduleReference.expression) &&
+      current.moduleReference.expression.text === "eta"
+    ) {
+      return true;
+    }
+    current = current.parent;
+  }
+  return false;
+}
+
+function symbolHasEtaDeclaration(symbol: ts.Symbol | undefined): boolean {
+  return (
+    symbol?.declarations?.some((declaration) =>
+      declarationComesFromEta(declaration),
+    ) ?? false
+  );
+}
+
+function symbolComesFromEta(
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): boolean {
+  const symbol = checker.getSymbolAtLocation(node);
+  if (!symbol) return false;
+  if (symbolHasEtaDeclaration(symbol)) return true;
+  if (symbol.flags & ts.SymbolFlags.Alias) {
+    return symbolHasEtaDeclaration(checker.getAliasedSymbol(symbol));
+  }
+  return false;
+}
+
+function typeComesFromEta(node: ts.Node, checker: ts.TypeChecker): boolean {
+  const type = checker.getTypeAtLocation(node);
+  if (
+    symbolHasEtaDeclaration(type.getSymbol()) ||
+    symbolHasEtaDeclaration(type.aliasSymbol)
+  ) {
+    return true;
+  }
+  for (const signature of [
+    ...type.getCallSignatures(),
+    ...type.getConstructSignatures(),
+  ]) {
+    if (
+      signature.declaration &&
+      declarationComesFromEta(signature.declaration)
+    ) {
+      return true;
+    }
+  }
+  for (const methodName of ETA_NAMED_TEMPLATE_RENDER_METHODS) {
+    if (symbolHasEtaDeclaration(type.getProperty(methodName))) return true;
+  }
+  return false;
 }
 
 function isNewEtaExpression(
   expr: ts.Expression,
   checker: ts.TypeChecker,
 ): expr is ts.NewExpression {
-  if (!ts.isNewExpression(expr)) return false;
-  if (symbolComesFromEta(expr.expression, checker)) return true;
   return (
-    (ts.isIdentifier(expr.expression) && expr.expression.text === "Eta") ||
-    (ts.isPropertyAccessExpression(expr.expression) &&
-      expr.expression.name.text === "Eta")
+    ts.isNewExpression(expr) &&
+    (symbolComesFromEta(expr.expression, checker) ||
+      typeComesFromEta(expr.expression, checker))
   );
 }
 
@@ -498,38 +661,85 @@ function mergeInstanceConfig(
   };
 }
 
+type EtaInstanceConfigResolver = (
+  expression: ts.Expression,
+) => EtaInstanceConfig | undefined;
+
 function collectEtaInstanceConfigs(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
-): Map<string, EtaInstanceConfig> {
-  const configs = new Map<string, EtaInstanceConfig>();
+): EtaInstanceConfigResolver {
+  const configs = new Map<ts.Symbol, EtaInstanceConfig>();
+  const resolving = new Set<ts.Symbol>();
+
+  function getExpressionSymbol(
+    expression: ts.Expression,
+  ): ts.Symbol | undefined {
+    const symbolNode = ts.isPropertyAccessExpression(expression)
+      ? expression.name
+      : expression;
+    let symbol = checker.getSymbolAtLocation(symbolNode);
+    if (symbol?.flags && symbol.flags & ts.SymbolFlags.Alias) {
+      symbol = checker.getAliasedSymbol(symbol);
+    }
+    return symbol;
+  }
 
   function configForExpression(
     expression: ts.Expression,
   ): EtaInstanceConfig | undefined {
-    if (ts.isIdentifier(expression)) return configs.get(expression.text);
-    if (isNewEtaExpression(expression, checker)) {
-      return getEtaInstanceConfigFromExpression(
-        expression.arguments?.[0],
-        sourceFile,
-      );
+    const symbol = getExpressionSymbol(expression);
+    if (symbol) {
+      const existing = configs.get(symbol);
+      if (existing) return existing;
+      if (resolving.has(symbol)) return undefined;
+      resolving.add(symbol);
     }
-    if (
+
+    let config: EtaInstanceConfig | undefined;
+    const resolved = resolveStaticExpression(expression, checker);
+    if (resolved !== expression) {
+      config = configForExpression(resolved);
+    } else if (isNewEtaExpression(expression, checker)) {
+      config = getEtaInstanceConfigFromExpression(
+        expression.arguments?.[0],
+        checker,
+      );
+    } else if (
       ts.isCallExpression(expression) &&
       ts.isPropertyAccessExpression(expression.expression) &&
-      expression.expression.name.text === "withConfig"
+      expression.expression.name.text === "withConfig" &&
+      typeComesFromEta(expression.expression.expression, checker)
     ) {
       const base =
         configForExpression(expression.expression.expression) ?? {
           languageOptions: DEFAULT_ETA_LANGUAGE_OPTIONS,
           defaultExtension: ".eta",
         };
-      return mergeInstanceConfig(
+      config = mergeInstanceConfig(
         base,
-        getEtaInstanceConfigFromExpression(expression.arguments[0], sourceFile),
+        getEtaInstanceConfigFromExpression(expression.arguments[0], checker),
       );
+    } else if (typeComesFromEta(expression, checker)) {
+      config = {
+        languageOptions: DEFAULT_ETA_LANGUAGE_OPTIONS,
+        defaultExtension: ".eta",
+      };
     }
-    return undefined;
+
+    if (symbol) {
+      resolving.delete(symbol);
+      if (config) configs.set(symbol, config);
+    }
+    return config;
+  }
+
+  function setExpressionConfig(
+    expression: ts.Expression,
+    config: EtaInstanceConfig,
+  ): void {
+    const symbol = getExpressionSymbol(expression);
+    if (symbol) configs.set(symbol, config);
   }
 
   function visit(node: ts.Node): void {
@@ -539,23 +749,25 @@ function collectEtaInstanceConfigs(
       node.initializer
     ) {
       const config = configForExpression(node.initializer);
-      if (config) configs.set(node.name.text, config);
+      if (config) {
+        const symbol = checker.getSymbolAtLocation(node.name);
+        if (symbol) configs.set(symbol, config);
+      }
     }
 
     if (
       ts.isCallExpression(node) &&
       ts.isPropertyAccessExpression(node.expression) &&
-      node.expression.name.text === "configure" &&
-      ts.isIdentifier(node.expression.expression)
+      node.expression.name.text === "configure"
     ) {
-      const instanceName = node.expression.expression.text;
-      const base = configs.get(instanceName);
+      const receiver = node.expression.expression;
+      const base = configForExpression(receiver);
       if (base) {
-        configs.set(
-          instanceName,
+        setExpressionConfig(
+          receiver,
           mergeInstanceConfig(
             base,
-            getEtaInstanceConfigFromExpression(node.arguments[0], sourceFile),
+            getEtaInstanceConfigFromExpression(node.arguments[0], checker),
           ),
         );
       }
@@ -565,7 +777,7 @@ function collectEtaInstanceConfigs(
   }
 
   visit(sourceFile);
-  return configs;
+  return configForExpression;
 }
 
 function templateKeysForWrite(key: string): string[] {
@@ -597,14 +809,27 @@ function setTemplateResolutionOptions(
   }
 }
 
+const templateDataTypeVariantsMap = new Map<string, Set<string>>();
+
+function renderTypeVariants(variants: Set<string>): string {
+  const values = [...variants];
+  return values.length === 1
+    ? values[0]
+    : values.map((value) => `(${value})`).join(" | ");
+}
+
 function mergeTemplateType(key: string, typeStr: string): void {
   for (const writeKey of templateKeysForWrite(key)) {
     const existing = templateDataTypeMap.get(writeKey);
+    let variants = templateDataTypeVariantsMap.get(writeKey);
     if (!existing) {
-      templateDataTypeMap.set(writeKey, typeStr);
-    } else if (existing !== typeStr && !existing.includes(typeStr)) {
-      templateDataTypeMap.set(writeKey, `${existing} & ${typeStr}`);
+      variants = new Set([typeStr]);
+    } else if (!variants || renderTypeVariants(variants) !== existing) {
+      variants = new Set([existing]);
     }
+    variants.add(typeStr);
+    templateDataTypeVariantsMap.set(writeKey, variants);
+    templateDataTypeMap.set(writeKey, renderTypeVariants(variants));
   }
 }
 
@@ -620,17 +845,11 @@ function definitionNodeForSymbol(symbol: ts.Symbol): ts.Node | undefined {
   return name && !ts.isComputedPropertyName(name) ? name : declaration;
 }
 
-function addTemplateDataDefinition(
+function storeTemplateDataDefinition(
   templateKey: string,
   dataPath: string[],
-  node: ts.Node,
+  definition: EtaDataDefinition,
 ): void {
-  const sourceFile = node.getSourceFile();
-  const definition: EtaDataDefinition = {
-    fileName: sourceFile.fileName,
-    start: node.getStart(sourceFile),
-    length: node.getWidth(sourceFile),
-  };
   for (const writeKey of templateKeysForWrite(templateKey)) {
     let definitionsByPath = templateDataDefinitionMap.get(writeKey);
     if (!definitionsByPath) {
@@ -654,12 +873,27 @@ function addTemplateDataDefinition(
   }
 }
 
-function collectTypeDataDefinitions(
+function addTemplateDataDefinition(
   templateKey: string,
+  dataPath: string[],
+  node: ts.Node,
+): void {
+  const sourceFile = node.getSourceFile();
+  storeTemplateDataDefinition(templateKey, dataPath, {
+    fileName: sourceFile.fileName,
+    start: node.getStart(sourceFile),
+    length: node.getWidth(sourceFile),
+  });
+}
+
+type DataDefinitionRecorder = (dataPath: string[], node: ts.Node) => void;
+
+function collectTypeDataDefinitions(
   checker: ts.TypeChecker,
   type: ts.Type,
   dataPath: string[],
   fallbackNode: ts.Node,
+  recordDefinition: DataDefinitionRecorder,
   depth = 0,
 ): void {
   if (depth > MAX_TYPE_DEPTH) return;
@@ -667,11 +901,11 @@ function collectTypeDataDefinitions(
   if (type.isUnionOrIntersection()) {
     for (const member of type.types) {
       collectTypeDataDefinitions(
-        templateKey,
         checker,
         member,
         dataPath,
         fallbackNode,
+        recordDefinition,
         depth + 1,
       );
     }
@@ -683,11 +917,11 @@ function collectTypeDataDefinitions(
       type as ts.TypeReference,
     )) {
       collectTypeDataDefinitions(
-        templateKey,
         checker,
         elementType,
         dataPath,
         fallbackNode,
+        recordDefinition,
         depth + 1,
       );
     }
@@ -706,9 +940,7 @@ function collectTypeDataDefinitions(
   for (const property of checker.getPropertiesOfType(type)) {
     const propertyPath = [...dataPath, property.name];
     const definitionNode = definitionNodeForSymbol(property);
-    if (definitionNode) {
-      addTemplateDataDefinition(templateKey, propertyPath, definitionNode);
-    }
+    if (definitionNode) recordDefinition(propertyPath, definitionNode);
 
     try {
       const propertyType = checker.getTypeOfSymbolAtLocation(
@@ -716,11 +948,11 @@ function collectTypeDataDefinitions(
         definitionNode ?? fallbackNode,
       );
       collectTypeDataDefinitions(
-        templateKey,
         checker,
         propertyType,
         propertyPath,
         definitionNode ?? fallbackNode,
+        recordDefinition,
         depth + 1,
       );
     } catch {
@@ -746,9 +978,66 @@ function expressionDefinitionNode(
   return (symbol && definitionNodeForSymbol(symbol)) ?? expression;
 }
 
+function isDataPathOverridden(
+  key: string,
+  overriddenTopLevelNames: Set<string>,
+): boolean {
+  for (const name of overriddenTopLevelNames) {
+    const topLevelKey = dataPathKey([name]);
+    if (
+      key === topLevelKey ||
+      key.startsWith(`${topLevelKey.slice(0, -1)},`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getOrCreateTemplateDataDefinitions(
+  templateKey: string,
+): Map<string, EtaDataDefinition[]> {
+  let definitions = templateDataDefinitionMap.get(templateKey);
+  if (!definitions) {
+    definitions = new Map();
+    templateDataDefinitionMap.set(templateKey, definitions);
+  }
+  return definitions;
+}
+
+function areDataDefinitionsEqual(
+  left: EtaDataDefinition,
+  right: EtaDataDefinition,
+): boolean {
+  return (
+    left.fileName === right.fileName &&
+    left.start === right.start &&
+    left.length === right.length
+  );
+}
+
+function mergeTemplateDataDefinitionEntry(
+  target: Map<string, EtaDataDefinition[]>,
+  key: string,
+  definitions: EtaDataDefinition[],
+): void {
+  const targetDefinitions = target.get(key) ?? [];
+  for (const definition of definitions) {
+    if (
+      !targetDefinitions.some((existing) =>
+        areDataDefinitionsEqual(existing, definition),
+      )
+    ) {
+      targetDefinitions.push(definition);
+    }
+  }
+  target.set(key, targetDefinitions);
+}
+
 function mergeTemplateDataDefinitions(
   targetKey: string,
   sourceKey: string,
+  overriddenTopLevelNames = new Set<string>(),
 ): void {
   const source =
     templateDataDefinitionMap.get(sourceKey) ??
@@ -758,29 +1047,180 @@ function mergeTemplateDataDefinitions(
   if (!source) return;
 
   for (const writeKey of templateKeysForWrite(targetKey)) {
-    let target = templateDataDefinitionMap.get(writeKey);
-    if (!target) {
-      target = new Map();
-      templateDataDefinitionMap.set(writeKey, target);
-    }
-
+    const target = getOrCreateTemplateDataDefinitions(writeKey);
     for (const [key, definitions] of source) {
-      const targetDefinitions = target.get(key) ?? [];
-      for (const definition of definitions) {
-        if (
-          !targetDefinitions.some(
-            (existing) =>
-              existing.fileName === definition.fileName &&
-              existing.start === definition.start &&
-              existing.length === definition.length,
-          )
-        ) {
-          targetDefinitions.push(definition);
-        }
-      }
-      target.set(key, targetDefinitions);
+      if (isDataPathOverridden(key, overriddenTopLevelNames)) continue;
+      mergeTemplateDataDefinitionEntry(target, key, definitions);
     }
   }
+}
+
+function addTypePropertyNames(
+  names: Set<string>,
+  type: ts.Type,
+  checker: ts.TypeChecker,
+): void {
+  for (const symbol of checker.getPropertiesOfType(type)) {
+    names.add(symbol.name);
+  }
+}
+
+function isSourceDataSpread(
+  expression: ts.Expression,
+  context: TemplateRelationshipContext,
+): boolean {
+  return (
+    ts.isIdentifier(expression) &&
+    expression.text === context.options.varName
+  );
+}
+
+function addObjectLiteralOverrideNames(
+  names: Set<string>,
+  expression: ts.ObjectLiteralExpression,
+  context: TemplateRelationshipContext,
+): void {
+  for (const property of expression.properties) {
+    if (ts.isSpreadAssignment(property)) {
+      if (!isSourceDataSpread(property.expression, context)) {
+        const spreadType = context.checker.getTypeAtLocation(
+          property.expression,
+        );
+        addTypePropertyNames(names, spreadType, context.checker);
+      }
+      continue;
+    }
+    const name = property.name && getPropertyName(property.name);
+    if (name !== undefined) names.add(name);
+  }
+}
+
+function getOverriddenTopLevelNames(
+  expression: ts.Expression,
+  context: TemplateRelationshipContext,
+): Set<string> {
+  const names = new Set<string>();
+  if (ts.isObjectLiteralExpression(expression)) {
+    addObjectLiteralOverrideNames(names, expression, context);
+  } else {
+    const type = context.checker.getTypeAtLocation(expression);
+    addTypePropertyNames(names, type, context.checker);
+  }
+  return names;
+}
+
+function configForRenderCall(
+  call: ts.CallExpression,
+  resolveConfig: EtaInstanceConfigResolver,
+): EtaInstanceConfig | undefined {
+  return ts.isPropertyAccessExpression(call.expression)
+    ? resolveConfig(call.expression.expression)
+    : undefined;
+}
+
+function isEtaRenderCall(
+  call: ts.CallExpression,
+  methodName: string,
+  checker: ts.TypeChecker,
+  resolveConfig: EtaInstanceConfigResolver,
+): boolean {
+  if (ts.isIdentifier(call.expression)) {
+    return (
+      ETA_NAMED_TEMPLATE_RENDER_METHODS.has(methodName) &&
+      (symbolComesFromEta(call.expression, checker) ||
+        typeComesFromEta(call.expression, checker))
+    );
+  }
+  if (!ts.isPropertyAccessExpression(call.expression)) return false;
+  const receiver = call.expression.expression;
+  return (
+    configForRenderCall(call, resolveConfig) !== undefined ||
+    symbolComesFromEta(receiver, checker) ||
+    symbolComesFromEta(call.expression.name, checker) ||
+    typeComesFromEta(receiver, checker) ||
+    typeComesFromEta(call.expression.name, checker)
+  );
+}
+
+function resolveStaticTemplateName(
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+): string | undefined {
+  const nameExpression = call.arguments[0];
+  if (!nameExpression) return undefined;
+  return getStringLiteralValue(resolveStaticExpression(nameExpression, checker));
+}
+
+function recordLoadTemplateCall(
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+  config: EtaInstanceConfig | undefined,
+): void {
+  const templateName = resolveStaticTemplateName(call, checker);
+  const templateExpression = call.arguments[1];
+  if (templateName === undefined || !templateExpression) return;
+  recordTemplateRegistration(
+    templateName,
+    templateExpression,
+    checker,
+    config,
+  );
+}
+
+function recordNamedTemplateRenderCall(
+  call: ts.CallExpression,
+  checker: ts.TypeChecker,
+  sourceFile: ts.SourceFile,
+  config: EtaInstanceConfig | undefined,
+): void {
+  const templateName = resolveStaticTemplateName(call, checker);
+  const dataArgument = call.arguments[1];
+  if (templateName === undefined || !dataArgument) return;
+  recordRenderCallType(
+    templateName,
+    dataArgument,
+    checker,
+    sourceFile,
+    config,
+  );
+}
+
+function analyzeEtaCall(
+  call: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+  checker: ts.TypeChecker,
+  resolveConfig: EtaInstanceConfigResolver,
+): void {
+  const methodName = getCalledMethodName(call.expression);
+  if (!methodName) return;
+
+  if (methodName === "loadTemplate") {
+    if (
+      !ts.isPropertyAccessExpression(call.expression) ||
+      !isEtaRenderCall(call, methodName, checker, resolveConfig)
+    ) {
+      return;
+    }
+    recordLoadTemplateCall(
+      call,
+      checker,
+      configForRenderCall(call, resolveConfig),
+    );
+    return;
+  }
+
+  if (
+    !ETA_NAMED_TEMPLATE_RENDER_METHODS.has(methodName) ||
+    !isEtaRenderCall(call, methodName, checker, resolveConfig)
+  ) {
+    return;
+  }
+  recordNamedTemplateRenderCall(
+    call,
+    checker,
+    sourceFile,
+    configForRenderCall(call, resolveConfig),
+  );
 }
 
 function templateKeyForReference(
@@ -832,19 +1272,21 @@ function recordRenderCallType(
       [],
       expressionDefinitionNode(dataArg, checker),
     );
-    collectTypeDataDefinitions(templateKey, checker, type, [], dataArg);
+    collectTypeDataDefinitions(
+      checker,
+      type,
+      [],
+      dataArg,
+      (dataPath, node) =>
+        addTemplateDataDefinition(templateKey, dataPath, node),
+    );
   } catch {
     // Type extraction failed for this call; skip it.
   }
 }
 
 function withLayoutBody(typeStr: string): string {
-  if (/\bbody\??:/.test(typeStr)) return typeStr;
-  const trimmed = typeStr.trim();
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-    return `${trimmed.slice(0, -1).trimEnd()}; body: string }`;
-  }
-  return `{ body: string } & ${trimmed}`;
+  return `__EtaOverride<${typeStr}, { body: string }>`;
 }
 
 function templateKeyFromPath(filePath: string): string {
@@ -853,7 +1295,17 @@ function templateKeyFromPath(filePath: string): string {
 
 function expressionToStructuralString(
   expression: ts.Expression,
+  checker?: ts.TypeChecker,
 ): string | undefined {
+  if (checker) {
+    try {
+      const type = checker.getTypeAtLocation(expression);
+      const typeString = typeToStructuralString(checker, type);
+      if (typeString !== "any" && typeString !== "unknown") return typeString;
+    } catch {
+      // Fall back to syntax-only inference below.
+    }
+  }
   if (ts.isStringLiteralLike(expression)) return "string";
   if (ts.isNumericLiteral(expression)) return "number";
   if (
@@ -881,7 +1333,9 @@ function expressionToStructuralString(
       if (!ts.isPropertyAssignment(property)) return [];
       const name = getPropertyName(property.name);
       const type = expressionToStructuralString(property.initializer);
-      return name && type ? [`${name}: ${type}`] : [];
+      return name && type
+        ? [`${typePropertyName(name)}: ${type}`]
+        : [];
     });
     return `{ ${properties.join("; ")} }`;
   }
@@ -898,12 +1352,111 @@ type TemplateRelationshipCall = ts.CallExpression & {
   expression: ts.Identifier;
 };
 
+interface VirtualTemplateAnalysis {
+  checker: ts.TypeChecker;
+  sourceFile: ts.SourceFile;
+}
+
+function createVirtualTemplateAnalysis(
+  fileName: string,
+  content: string,
+): VirtualTemplateAnalysis {
+  const compilerOptions: ts.CompilerOptions = {
+    ...DEFAULT_COMPILER_OPTIONS,
+    strict: true,
+  };
+  const normalizedFileName = path.normalize(fileName);
+  const host = ts.createCompilerHost(compilerOptions, true);
+  const getSourceFile = host.getSourceFile.bind(host);
+  const fileExists = host.fileExists.bind(host);
+  const readFile = host.readFile.bind(host);
+  host.fileExists = (candidate) =>
+    path.normalize(candidate) === normalizedFileName || fileExists(candidate);
+  host.readFile = (candidate) =>
+    path.normalize(candidate) === normalizedFileName
+      ? content
+      : readFile(candidate);
+  host.getSourceFile = (
+    candidate,
+    languageVersion,
+    onError,
+    shouldCreateNewSourceFile,
+  ) =>
+    path.normalize(candidate) === normalizedFileName
+      ? ts.createSourceFile(
+          candidate,
+          content,
+          languageVersion,
+          true,
+          ts.ScriptKind.TS,
+        )
+      : getSourceFile(
+          candidate,
+          languageVersion,
+          onError,
+          shouldCreateNewSourceFile,
+        );
+  const program = ts.createProgram({
+    rootNames: [fileName],
+    options: compilerOptions,
+    host,
+  });
+  const sourceFile = program.getSourceFile(fileName);
+  if (!sourceFile) throw new Error(`Unable to analyze ${fileName}`);
+  return { checker: program.getTypeChecker(), sourceFile };
+}
+
 interface TemplateRelationshipContext {
   etaFile: string;
   sourceKey: string;
   sourceType: string;
   options: EtaLanguageOptions;
   resolution: EtaTemplateResolutionOptions | undefined;
+  checker: ts.TypeChecker;
+  virtualSourceFile: ts.SourceFile;
+  bodyStart: number;
+  sourceLength: number;
+}
+
+function addVirtualTemplateDataDefinition(
+  context: TemplateRelationshipContext,
+  templateKey: string,
+  dataPath: string[],
+  node: ts.Node,
+): void {
+  if (node.getSourceFile() !== context.virtualSourceFile) return;
+  const start = node.getStart(context.virtualSourceFile) - context.bodyStart;
+  if (start < 0 || start >= context.sourceLength) return;
+  storeTemplateDataDefinition(templateKey, dataPath, {
+    fileName: context.etaFile,
+    start,
+    length: Math.min(
+      node.getWidth(context.virtualSourceFile),
+      context.sourceLength - start,
+    ),
+  });
+}
+
+function recordExplicitDataDefinitions(
+  context: TemplateRelationshipContext,
+  templateKey: string,
+  expression: ts.Expression,
+): void {
+  addVirtualTemplateDataDefinition(
+    context,
+    templateKey,
+    [],
+    expressionDefinitionNode(expression, context.checker),
+  );
+  const type = context.checker.getTypeAtLocation(expression);
+  collectTypeDataDefinitions(
+    context.checker,
+    type,
+    [],
+    expression,
+    (dataPath, node) =>
+      addVirtualTemplateDataDefinition(context, templateKey, dataPath, node),
+  );
 }
 
 function isTemplateRelationshipCall(
@@ -934,15 +1487,30 @@ function getRelationshipTargetKey(
   );
 }
 
+function recordTemplateGraphEdge(sourceKey: string, targetKey: string): void {
+  const sourceTargets = templateRelationshipMap.get(sourceKey) ?? new Set();
+  sourceTargets.add(targetKey);
+  templateRelationshipMap.set(sourceKey, sourceTargets);
+  const targetSources = templateRelationshipMap.get(targetKey) ?? new Set();
+  targetSources.add(sourceKey);
+  templateRelationshipMap.set(targetKey, targetSources);
+}
+
 function getPropagatedRelationshipType(
   call: TemplateRelationshipCall,
-  sourceType: string,
+  context: TemplateRelationshipContext,
 ): string {
-  let propagatedType = sourceType;
+  let propagatedType = context.sourceType;
   const dataArgument = call.arguments[1];
   if (dataArgument) {
-    const explicitType = expressionToStructuralString(dataArgument);
-    if (explicitType) propagatedType = `${sourceType} & ${explicitType}`;
+    const explicitType = expressionToStructuralString(
+      dataArgument,
+      context.checker,
+    );
+
+    if (explicitType) {
+      propagatedType = `__EtaOverride<${context.sourceType}, ${explicitType}>`;
+    }
   }
   return call.expression.text === "layout"
     ? withLayoutBody(propagatedType)
@@ -955,12 +1523,21 @@ function recordTemplateRelationship(
 ): void {
   const targetKey = getRelationshipTargetKey(call, context);
   if (!targetKey || targetKey === context.sourceKey) return;
+  recordTemplateGraphEdge(context.sourceKey, targetKey);
 
-  mergeTemplateType(
+  mergeTemplateType(targetKey, getPropagatedRelationshipType(call, context));
+  const dataArgument = call.arguments[1];
+  const overriddenNames = dataArgument
+    ? getOverriddenTopLevelNames(dataArgument, context)
+    : new Set<string>();
+  mergeTemplateDataDefinitions(
     targetKey,
-    getPropagatedRelationshipType(call, context.sourceType),
+    context.sourceKey,
+    overriddenNames,
   );
-  mergeTemplateDataDefinitions(targetKey, context.sourceKey);
+  if (dataArgument) {
+    recordExplicitDataDefinitions(context, targetKey, dataArgument);
+  }
   if (!templateLanguageOptionsMap.has(targetKey)) {
     setTemplateLanguageOptions(targetKey, context.options);
   }
@@ -980,19 +1557,21 @@ function analyzeTemplateRelationships(
 ): void {
   const virtualFileName = `${etaFile}.ts`;
   const virtual = buildVirtualDocument(source, sourceType, options);
-  const sourceFile = ts.createSourceFile(
+  const analysis = createVirtualTemplateAnalysis(
     virtualFileName,
     virtual.content,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
   );
+  const sourceFile = analysis.sourceFile;
   const sourceKey = templateKeyFromPath(etaFile);
   const context: TemplateRelationshipContext = {
     etaFile,
     sourceKey,
     sourceType,
     options,
+    checker: analysis.checker,
+    virtualSourceFile: sourceFile,
+    bodyStart: virtual.bodyOffset,
+    sourceLength: source.length,
     resolution:
       templateResolutionOptionsMap.get(sourceKey) ??
       templateResolutionOptionsMap.get(
@@ -1036,6 +1615,52 @@ export function analyzeEtaTemplateLayouts(etaFiles: string[]): void {
     }
   }
 }
+function recordTemplateRegistration(
+  name: string,
+  templateExpression: ts.Expression,
+  checker: ts.TypeChecker,
+  config: EtaInstanceConfig | undefined,
+): void {
+  const resolved = resolveStaticExpression(templateExpression, checker);
+  const sourceFile = resolved.getSourceFile();
+  const isLiteral =
+    ts.isStringLiteral(resolved) ||
+    ts.isNoSubstitutionTemplateLiteral(resolved);
+  const definitionNode = isLiteral
+    ? resolved
+    : expressionDefinitionNode(templateExpression, checker);
+  const definitionSource = definitionNode.getSourceFile();
+  const start = definitionNode.getStart(definitionSource) + (isLiteral ? 1 : 0);
+  const length = Math.max(
+    0,
+    definitionNode.getWidth(definitionSource) - (isLiteral ? 2 : 0),
+  );
+  const registration: EtaTemplateRegistration = {
+    name,
+    fileName: isLiteral ? sourceFile.fileName : definitionSource.fileName,
+    start,
+    length,
+  };
+  const registrations = templateRegistrationMap.get(name) ?? [];
+  if (
+    !registrations.some(
+      (existing) =>
+        existing.fileName === registration.fileName &&
+        existing.start === registration.start &&
+        existing.length === registration.length,
+    )
+  ) {
+    registrations.push(registration);
+    templateRegistrationMap.set(name, registrations);
+  }
+  if (config) {
+    setTemplateLanguageOptions(name, config.languageOptions);
+    setTemplateResolutionOptions(name, {
+      views: config.views,
+      defaultExtension: config.defaultExtension,
+    });
+  }
+}
 
 /**
  * Walk one source file's AST looking for `eta.render*(templateLiteral, data)`
@@ -1045,88 +1670,15 @@ export function analyzeFileForEtaCalls(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
 ): void {
-  const etaInstanceConfigs = collectEtaInstanceConfigs(sourceFile, checker);
-
-  function configForRenderCall(
-    call: ts.CallExpression,
-  ): EtaInstanceConfig | undefined {
-    if (!ts.isPropertyAccessExpression(call.expression)) return undefined;
-    const receiver = call.expression.expression;
-    if (ts.isIdentifier(receiver)) return etaInstanceConfigs.get(receiver.text);
-    if (
-      ts.isCallExpression(receiver) &&
-      ts.isPropertyAccessExpression(receiver.expression) &&
-      receiver.expression.name.text === "withConfig"
-    ) {
-      const baseReceiver = receiver.expression.expression;
-      const base =
-        (ts.isIdentifier(baseReceiver)
-          ? etaInstanceConfigs.get(baseReceiver.text)
-          : undefined) ?? {
-          languageOptions: DEFAULT_ETA_LANGUAGE_OPTIONS,
-          defaultExtension: ".eta",
-        };
-      return mergeInstanceConfig(
-        base,
-        getEtaInstanceConfigFromExpression(receiver.arguments[0], sourceFile),
-      );
-    }
-    return undefined;
-  }
-
-  function isEtaRenderCall(
-    call: ts.CallExpression,
-    methodName: string,
-  ): boolean {
-    if (ts.isIdentifier(call.expression)) {
-      return (
-        symbolComesFromEta(call.expression, checker) ||
-        ETA_NAMED_TEMPLATE_RENDER_METHODS.has(call.expression.text)
-      );
-    }
-    if (!ts.isPropertyAccessExpression(call.expression)) return false;
-    const receiver = call.expression.expression;
-    if (ts.isIdentifier(receiver)) {
-      return (
-        etaInstanceConfigs.has(receiver.text) ||
-        receiver.text.toLowerCase() === "eta" ||
-        symbolComesFromEta(receiver, checker) ||
-        symbolComesFromEta(call.expression.name, checker)
-      );
-    }
-    const config = configForRenderCall(call);
-    return (
-      config !== undefined ||
-      (methodName.startsWith("render") &&
-        symbolComesFromEta(call.expression.name, checker))
-    );
-  }
+  const resolveConfig = collectEtaInstanceConfigs(sourceFile, checker);
 
   function visit(node: ts.Node): void {
     if (ts.isCallExpression(node)) {
-      const methodName = getCalledMethodName(node.expression);
-      if (
-        methodName &&
-        ETA_NAMED_TEMPLATE_RENDER_METHODS.has(methodName) &&
-        isEtaRenderCall(node, methodName)
-      ) {
-        const templateName = node.arguments[0]
-          ? getStringLiteralValue(node.arguments[0])
-          : undefined;
-        const dataArgument = node.arguments[1];
-        if (templateName !== undefined && dataArgument) {
-          recordRenderCallType(
-            templateName,
-            dataArgument,
-            checker,
-            sourceFile,
-            configForRenderCall(node),
-          );
-        }
-      }
+      analyzeEtaCall(node, sourceFile, checker, resolveConfig);
     }
     ts.forEachChild(node, visit);
   }
+
   visit(sourceFile);
 }
 
@@ -1154,22 +1706,56 @@ function analyzeOneSourceFile(
   }
 }
 
+function getWorkspaceAnalysisProjects(
+  rootNames: string[],
+  projects: WorkspaceProject[],
+): WorkspaceProject[] {
+  const configuredFiles = new Set<string>();
+  for (const project of projects) {
+    for (const fileName of project.rootNames) {
+      configuredFiles.add(canonicalTemplatePath(fileName));
+    }
+  }
+
+  const inferredFiles = new Map<WorkspaceProject | undefined, string[]>();
+  for (const fileName of rootNames) {
+    if (configuredFiles.has(canonicalTemplatePath(fileName))) continue;
+    const project = findMostSpecificContainingRoot(fileName, projects);
+    const projectFiles = inferredFiles.get(project);
+    if (projectFiles) {
+      projectFiles.push(fileName);
+    } else {
+      inferredFiles.set(project, [fileName]);
+    }
+  }
+  if (inferredFiles.size === 0) return projects;
+
+  const analysisProjects = [...projects];
+  for (const [project, projectFiles] of inferredFiles) {
+    analysisProjects.push({
+      root: project?.root ?? process.cwd(),
+      rootNames: projectFiles,
+      options: {
+        ...DEFAULT_COMPILER_OPTIONS,
+        ...(project?.options ?? {}),
+        allowJs: true,
+        noEmit: true,
+      },
+    });
+  }
+  return analysisProjects;
+}
+
 export function analyzeWorkspaceFiles(
   rootNames: string[],
   hooks: WorkspaceAnalysisHooks = {},
   projects: WorkspaceProject[] = [],
 ): void {
   try {
-    const configuredProjects =
-      projects.length > 0
-        ? projects
-        : [
-            {
-              root: process.cwd(),
-              rootNames,
-              options: DEFAULT_COMPILER_OPTIONS,
-            },
-          ];
+    const configuredProjects = getWorkspaceAnalysisProjects(
+      rootNames,
+      projects,
+    );
     const analyzedFiles = new Set<string>();
     for (const project of configuredProjects) {
       const program = ts.createProgram({
@@ -1200,16 +1786,7 @@ export function analyzeWorkspaceFiles(
 export function getWorkspaceProjectForFile(
   fileName: string,
 ): WorkspaceProject | undefined {
-  const normalized = canonicalTemplatePath(fileName);
-  return workspaceProjects
-    .filter((project) => {
-      const relative = path.relative(
-        canonicalTemplatePath(project.root),
-        normalized,
-      );
-      return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-    })
-    .sort((left, right) => right.root.length - left.root.length)[0];
+  return findMostSpecificContainingRoot(fileName, workspaceProjects);
 }
 
 function mapKeyForTemplateUri<T>(
@@ -1267,6 +1844,31 @@ export function getEtaLanguageOptionsForUri(
     return undefined;
   }
 }
+export function areEtaTemplatesRelated(
+  leftFileName: string,
+  rightFileName: string,
+): boolean {
+  const left = canonicalTemplatePath(leftFileName);
+  const right = canonicalTemplatePath(rightFileName);
+  if (left === right) return true;
+  const queue = [left, path.basename(left, path.extname(left))];
+  const targets = new Set([
+    right,
+    path.basename(right, path.extname(right)),
+  ]);
+  const visited = new Set<string>();
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || visited.has(current)) continue;
+    if (targets.has(current)) return true;
+    visited.add(current);
+    for (const related of templateRelationshipMap.get(current) ?? []) {
+      if (!visited.has(related)) queue.push(related);
+    }
+  }
+  return false;
+}
+
 
 export function getTemplateResolutionOptionsForUri(
   uri: string,

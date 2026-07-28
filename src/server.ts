@@ -17,11 +17,27 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import ts from "typescript";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { buildVirtualDocument } from "./virtualDocument";
+import {
+  buildRuntimeVirtualDocument,
+  buildVirtualDocument,
+} from "./virtualDocument";
 import { getEtaDataPathAtPosition, offsetToPosition } from "./definition";
 import { isInsideEtaTagInText, positionToOffset } from "./position";
 import { tsKindToLSP } from "./lspKind";
 import { createServerLogger } from "./logging";
+import {
+  ETA_LANGUAGE_SUPPORT_MANIFEST,
+  areManifestTemplatesRelated,
+  getManifestSymbolAt,
+  getManifestTemplate,
+  loadEtaLanguageSupportManifest,
+  sourceOffsetToVirtual,
+  virtualRangeToSource,
+  type EtaLanguageSupportManifest,
+  type EtaManifestSymbol,
+  type EtaManifestTemplate,
+  type EtaManifestVirtualDocument,
+} from "./etaManifest";
 import {
   DEFAULT_ETA_LANGUAGE_OPTIONS,
   EtaLanguageOptions,
@@ -30,13 +46,24 @@ import {
 } from "./etaConfig";
 import { findEtaTagRanges } from "./etaScanner";
 import {
+  ETA_SEMANTIC_TOKEN_TYPES,
+  collectEtaSemanticTokens,
+} from "./semanticTokens";
+import {
   getBlockCallContextAtOffset,
   getBlockCallContexts,
   getTemplatePathCompletions,
   getTemplatePathContextAtOffset,
+  type BlockCallContext,
+  type StringCallContext,
 } from "./templateContext";
-import { resolveTemplatePath } from "./templatePaths";
 import {
+  findMostSpecificContainingRoot,
+  isFileWithinRoot,
+  resolveTemplatePath,
+} from "./templatePaths";
+import {
+  areEtaTemplatesRelated,
   analyzeWorkspaceFiles,
   getDataDefinitionsForUri,
   getEtaLanguageOptionsForUri,
@@ -45,15 +72,17 @@ import {
   getWorkspaceProjectForFile,
   scanWorkspaceFiles,
   templateDataDefinitionMap,
+  templateRegistrationMap,
   templateDataTypeMap,
   templateLanguageOptionsMap,
+  templateRelationshipMap,
   templateResolutionOptionsMap,
   workspaceEtaFiles,
   workspaceProjects,
   workspaceTsFiles,
+  WORKSPACE_SCRIPT_EXTENSIONS,
+  type WorkspaceProject,
 } from "./typeInference";
-import type { WorkspaceProject } from "./typeInference";
-
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -63,7 +92,16 @@ const virtualLog = createServerLogger(connection.console, "virtual");
 
 const virtualContents = new Map<string, string>(); // virtualPath -> content
 const uriToVirtualPath = new Map<string, string>(); // uri -> virtualPath
-const virtualPreambleLines = new Map<string, number>();
+const virtualDocuments = new Map<string, EtaManifestVirtualDocument>();
+const workspaceManifests = new Map<string, EtaLanguageSupportManifest>();
+const manifestTemplateCache = new Map<
+  string,
+  {
+    manifest: EtaLanguageSupportManifest;
+    source: string;
+    template: EtaManifestTemplate | undefined;
+  }
+>();
 
 let workspaceRoot: string | undefined;
 const workspaceRoots: string[] = [];
@@ -82,6 +120,129 @@ function getVirtualPath(uri: string): string {
   }
   return vp;
 }
+function canonicalExistingPath(fileName: string): string {
+  try {
+    return ts.sys.realpath?.(fileName) ?? fileName;
+  } catch {
+    return fileName;
+  }
+}
+
+function getWorkspaceManifestForFile(
+  fileName: string,
+): EtaLanguageSupportManifest | undefined {
+  return findMostSpecificContainingRoot(
+    canonicalExistingPath(fileName),
+    workspaceManifests.values(),
+  );
+}
+
+function getFreshManifestForUri(
+  uri: string,
+  source?: string,
+): EtaLanguageSupportManifest | undefined {
+  if (!getFreshManifestTemplate(uri, source)) return undefined;
+  try {
+    return getWorkspaceManifestForFile(
+      canonicalExistingPath(fileURLToPath(uri)),
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+function locationFromManifestLocation(
+  manifest: EtaLanguageSupportManifest,
+  location: { fileName: string; start: number; length: number },
+): Location | undefined {
+  if (!isFileWithinRoot(location.fileName, manifest.root)) return undefined;
+  return locationFromFileOffsets(
+    location.fileName,
+    location.start,
+    location.length,
+  );
+}
+
+function getManifestSymbolContext(
+  uri: string,
+  source: string,
+  offset: number,
+):
+  | { manifest: EtaLanguageSupportManifest; symbol: EtaManifestSymbol }
+  | undefined {
+  const manifest = getFreshManifestForUri(uri, source);
+  if (!manifest) return undefined;
+  try {
+    const symbol = getManifestSymbolAt(
+      manifest,
+      canonicalExistingPath(fileURLToPath(uri)),
+      offset,
+    );
+    return symbol ? { manifest, symbol } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getFreshManifestTemplate(
+  uri: string,
+  source?: string,
+): EtaManifestTemplate | undefined {
+  try {
+    const fileName = canonicalExistingPath(fileURLToPath(uri));
+    const manifest = getWorkspaceManifestForFile(fileName);
+    if (!manifest) {
+      manifestTemplateCache.delete(uri);
+      return undefined;
+    }
+    const currentSource =
+      source ?? documents.get(uri)?.getText() ?? ts.sys.readFile(fileName);
+    if (currentSource === undefined) return undefined;
+    const cached = manifestTemplateCache.get(uri);
+    if (cached?.manifest === manifest && cached.source === currentSource) {
+      return cached.template;
+    }
+    const template = getManifestTemplate(manifest, fileName, currentSource);
+    manifestTemplateCache.set(uri, {
+      manifest,
+      source: currentSource,
+      template,
+    });
+    return template;
+  } catch {
+    manifestTemplateCache.delete(uri);
+    return undefined;
+  }
+}
+
+function reloadWorkspaceManifests(): void {
+  manifestTemplateCache.clear();
+  workspaceManifests.clear();
+  for (const root of workspaceRoots) {
+    const result = loadEtaLanguageSupportManifest(root);
+    if (result.status === "loaded") {
+      workspaceManifests.set(result.manifest.root, result.manifest);
+      analysisLog.info(
+        `Loaded ${ETA_LANGUAGE_SUPPORT_MANIFEST} (${result.manifest.templates.size} templates)`,
+      );
+    } else if (result.status !== "missing") {
+      for (const message of result.messages) {
+        analysisLog.warn(`${ETA_LANGUAGE_SUPPORT_MANIFEST}: ${message}`);
+      }
+    }
+  }
+}
+
+function refreshWorkspaceFiles(): void {
+  workspaceTsFiles.clear();
+  workspaceEtaFiles.clear();
+  workspaceProjects.length = 0;
+  workspaceRoot = workspaceRoots[0];
+  for (const root of workspaceRoots) scanWorkspaceFiles(root);
+  activeWorkspaceProject = undefined;
+  languageService?.dispose();
+  languageService = null;
+}
 
 function ensureWorkspaceAnalyzed(): void {
   if (workspaceAnalyzed) return;
@@ -91,9 +252,11 @@ function ensureWorkspaceAnalyzed(): void {
 
 function runWorkspaceAnalysis(): void {
   templateDataTypeMap.clear();
+  templateRegistrationMap.clear();
   templateDataDefinitionMap.clear();
   templateLanguageOptionsMap.clear();
   templateResolutionOptionsMap.clear();
+  templateRelationshipMap.clear();
   serviceVersion++;
 
   const rootNames = [...workspaceTsFiles];
@@ -111,7 +274,7 @@ function runWorkspaceAnalysis(): void {
         },
         onMapping: (fileName, key, value) => {
           analysisLog.debug(
-            `${path.basename(fileName)}: "${key}" -> ${value.substring(0, 100)}`,
+            `${path.basename(fileName)}: "${key}" inferred (${value.length} characters)`,
           );
         },
       },
@@ -122,19 +285,30 @@ function runWorkspaceAnalysis(): void {
   analysisLog.info(
     `Complete - map entries: [${[...templateDataTypeMap.keys()].join(", ")}]`,
   );
-  for (const [k, v] of templateDataTypeMap) {
-    analysisLog.debug(`"${k}" -> ${v.substring(0, 120)}`);
+  for (const [key, value] of templateDataTypeMap) {
+    analysisLog.debug(`"${key}" inferred (${value.length} characters)`);
   }
+
+  reloadWorkspaceManifests();
 
   rebuildOpenVirtualFiles();
 }
 
 function getDocumentLanguageOptions(uri: string): EtaLanguageOptions {
+  const manifestOptions = getFreshManifestTemplate(uri)?.options;
+  if (manifestOptions) return manifestOptions;
   const inferredOptions =
     getEtaLanguageOptionsForUri(uri) ?? DEFAULT_ETA_LANGUAGE_OPTIONS;
   return applyNonDefaultEtaLanguageOptions(
     inferredOptions,
     etaLanguageOptions,
+  );
+}
+
+function getDocumentResolutionOptions(uri: string) {
+  return (
+    getFreshManifestTemplate(uri)?.resolution ??
+    getTemplateResolutionOptionsForUri(uri)
   );
 }
 
@@ -149,12 +323,18 @@ function rebuildOpenVirtualFiles(): void {
 }
 
 function isWorkspaceSourceFile(fsPath: string): boolean {
-  return [".ts", ".tsx", ".js", ".jsx"].includes(path.extname(fsPath));
+  return WORKSPACE_SCRIPT_EXTENSIONS.includes(
+    path.extname(fsPath) as (typeof WORKSPACE_SCRIPT_EXTENSIONS)[number],
+  );
 }
 
 function isWorkspaceConfigFile(fsPath: string): boolean {
   const basename = path.basename(fsPath).toLowerCase();
-  return basename === "tsconfig.json" || basename === "jsconfig.json";
+  return (
+    basename === "tsconfig.json" ||
+    basename === "jsconfig.json" ||
+    basename === ETA_LANGUAGE_SUPPORT_MANIFEST
+  );
 }
 
 function isEtaTemplateFile(fsPath: string): boolean {
@@ -214,21 +394,47 @@ function activateWorkspaceProject(uri: string): void {
   }
 }
 
-
 function updateVirtualFile(uri: string, etaSource: string): void {
   const virtualPath = getVirtualPath(uri);
+  const manifestTemplate = getFreshManifestTemplate(uri, etaSource);
   const itType = getItTypeForUri(uri);
-  const options = getDocumentLanguageOptions(uri);
-  const virtualDocument = buildVirtualDocument(etaSource, itType, options);
-  const newContent = virtualDocument.content;
-  virtualPreambleLines.set(virtualPath, virtualDocument.preambleLineCount);
+  const options = manifestTemplate?.options ?? getDocumentLanguageOptions(uri);
+  let virtualDocument: EtaManifestVirtualDocument;
+  if (manifestTemplate) {
+    virtualDocument = manifestTemplate.virtualDocument;
+  } else {
+    const built = buildVirtualDocument(etaSource, itType, options);
+    const virtualBodyStart = positionToOffset(
+      built.content,
+      built.preambleLineCount,
+      0,
+    );
+    const mappings =
+      etaSource.length > 0
+        ? [
+            {
+              sourceStart: 0,
+              sourceLength: etaSource.length,
+              virtualStart: virtualBodyStart,
+              virtualLength: etaSource.length,
+            },
+          ]
+        : [];
+    virtualDocument = {
+      content: built.content,
+      mappings,
+      mappingsByVirtual: mappings,
+    };
+  }
+  virtualDocuments.set(virtualPath, virtualDocument);
 
-  if (virtualContents.get(virtualPath) !== newContent) {
-    virtualContents.set(virtualPath, newContent);
+  if (virtualContents.get(virtualPath) !== virtualDocument.content) {
+    virtualContents.set(virtualPath, virtualDocument.content);
     serviceVersion++;
     try {
+      const source = manifestTemplate ? "manifest" : "static analysis";
       virtualLog.debug(
-        `${path.basename(fileURLToPath(uri))} -> it: ${itType.substring(0, 120)}`,
+        `${path.basename(fileURLToPath(uri))}: virtual document from ${source}`,
       );
     } catch {
       // fileURLToPath may fail for non-file URIs
@@ -240,22 +446,15 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
   etaLanguageOptions = normalizeEtaLanguageOptions(
     params.initializationOptions?.etaLanguageOptions,
   );
-  const roots = params.workspaceFolders?.map((folder) => folder.uri) ?? [];
-  workspaceTsFiles.clear();
-  workspaceEtaFiles.clear();
-  workspaceProjects.length = 0;
-  workspaceRoot = undefined;
   workspaceRoots.length = 0;
-  for (const rootUri of roots) {
+  for (const rootUri of params.workspaceFolders?.map((folder) => folder.uri) ?? []) {
     try {
-      const root = fileURLToPath(rootUri);
-      workspaceRoot ??= root;
-      workspaceRoots.push(root);
-      scanWorkspaceFiles(root);
+      workspaceRoots.push(fileURLToPath(rootUri));
     } catch {
       // Ignore workspace folders whose URI cannot be resolved locally.
     }
   }
+  refreshWorkspaceFiles();
   return {
     capabilities: {
       textDocumentSync: TextDocumentSyncKind.Incremental,
@@ -272,11 +471,52 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
         retriggerCharacters: [","],
       },
       semanticTokensProvider: {
-        legend: { tokenTypes: ["macro"], tokenModifiers: [] },
+        legend: { tokenTypes: [...ETA_SEMANTIC_TOKEN_TYPES], tokenModifiers: [] },
         full: true,
+      },
+      workspace: {
+        workspaceFolders: {
+          supported: true,
+          changeNotifications: true,
+        },
       },
     },
   };
+});
+connection.onInitialized?.(() => {
+  connection.workspace.onDidChangeWorkspaceFolders((event) => {
+    let changed = false;
+    for (const removed of event.removed) {
+      try {
+        const root = fileURLToPath(removed.uri);
+        const index = workspaceRoots.findIndex(
+          (candidate) => path.resolve(candidate) === path.resolve(root),
+        );
+        if (index >= 0) {
+          workspaceRoots.splice(index, 1);
+          changed = true;
+        }
+      } catch {
+        // Ignore workspace folders whose URI cannot be resolved locally.
+      }
+    }
+    for (const added of event.added) {
+      try {
+        const root = fileURLToPath(added.uri);
+        if (!workspaceRoots.some((candidate) => path.resolve(candidate) === path.resolve(root))) {
+          workspaceRoots.push(root);
+          changed = true;
+        }
+      } catch {
+        // Ignore workspace folders whose URI cannot be resolved locally.
+      }
+    }
+    if (changed) {
+      refreshWorkspaceFiles();
+      workspaceAnalyzed = true;
+      runWorkspaceAnalysis();
+    }
+  });
 });
 
 connection.onDidChangeConfiguration?.((change) => {
@@ -303,6 +543,17 @@ documents.onDidOpen((event) => {
 documents.onDidChangeContent((change) => {
   updateVirtualFile(change.document.uri, change.document.getText());
   publishDiagnostics(change.document.uri);
+});
+documents.onDidClose?.((event) => {
+  const virtualPath = uriToVirtualPath.get(event.document.uri);
+  if (virtualPath) {
+    virtualContents.delete(virtualPath);
+    virtualDocuments.delete(virtualPath);
+    manifestTemplateCache.delete(event.document.uri);
+    uriToVirtualPath.delete(event.document.uri);
+    serviceVersion++;
+  }
+  connection.sendDiagnostics({ uri: event.document.uri, diagnostics: [] });
 });
 
 connection.onDidChangeWatchedFiles((params) => {
@@ -331,25 +582,17 @@ connection.onDidChangeWatchedFiles((params) => {
       // unparseable URI; skip
     }
   }
-  if (configChanged) {
-    workspaceTsFiles.clear();
-    workspaceEtaFiles.clear();
-    workspaceProjects.length = 0;
-    for (const root of workspaceRoots) scanWorkspaceFiles(root);
-    activeWorkspaceProject = undefined;
-    languageService?.dispose();
-    languageService = null;
-  }
+  if (configChanged) refreshWorkspaceFiles();
   if (needsReanalysis) runWorkspaceAnalysis();
 });
 
 interface VirtualPosition {
   docText: string;
   options: EtaLanguageOptions;
+  sourceOffset: number;
   virtualContent: string;
   virtualOffset: number;
   virtualPath: string;
-  preambleLineCount: number;
 }
 
 function getVirtualPosition(
@@ -375,30 +618,30 @@ function getVirtualPosition(
   activateWorkspaceProject(params.textDocument.uri);
   updateVirtualFile(params.textDocument.uri, docText);
   const virtualContent = virtualContents.get(virtualPath) ?? "";
-  const preambleLineCount = virtualPreambleLines.get(virtualPath) ?? 0;
-  const virtualOffset = positionToOffset(
-    virtualContent,
-    params.position.line + preambleLineCount,
+  const sourceOffset = positionToOffset(
+    docText,
+    params.position.line,
     params.position.character,
   );
+  const sourceMap = virtualDocuments.get(virtualPath);
+  const virtualOffset = sourceMap
+    ? sourceOffsetToVirtual(sourceMap, sourceOffset)
+    : undefined;
+  if (virtualOffset === undefined) return undefined;
   return {
     docText,
     options,
+    sourceOffset,
     virtualContent,
     virtualOffset,
     virtualPath,
-    preambleLineCount,
   };
 }
 
 connection.onCompletion((params: TextDocumentPositionParams) => {
   const virtual = getVirtualPosition(params);
   if (!virtual) return [];
-  const sourceOffset = positionToOffset(
-    virtual.docText,
-    params.position.line,
-    params.position.character,
-  );
+  const sourceOffset = virtual.sourceOffset;
   const pathContext = getTemplatePathContextAtOffset(
     virtual.docText,
     sourceOffset,
@@ -406,14 +649,21 @@ connection.onCompletion((params: TextDocumentPositionParams) => {
   );
   if (pathContext) {
     try {
-      const resolutionOptions = getTemplateResolutionOptionsForUri(
+      const resolutionOptions = getDocumentResolutionOptions(
         params.textDocument.uri,
       );
+      const manifest = getFreshManifestForUri(
+        params.textDocument.uri,
+        virtual.docText,
+      );
+      const registeredNames =
+        manifest?.templateNames.keys() ?? templateRegistrationMap.keys();
       return getTemplatePathCompletions(
         fileURLToPath(params.textDocument.uri),
         pathContext.value,
         workspaceEtaFiles,
         resolutionOptions?.views,
+        registeredNames,
       ).map((value) => ({
         label: value,
         kind: CompletionItemKind.File,
@@ -429,7 +679,6 @@ connection.onCompletion((params: TextDocumentPositionParams) => {
       return [];
     }
   }
-
 
   const completions = getLanguageService().getCompletionsAtPosition(
     virtual.virtualPath,
@@ -488,44 +737,122 @@ function* getWorkspaceEtaDocuments(): Generator<{
     if (source !== undefined) yield { uri, source };
   }
 }
-function getEtaNavigationLocations(
+
+function areTemplateUrisRelated(leftUri: string, rightUri: string): boolean {
+  try {
+    const leftPath = canonicalExistingPath(fileURLToPath(leftUri));
+    const rightPath = canonicalExistingPath(fileURLToPath(rightUri));
+    const manifest = getFreshManifestForUri(leftUri);
+    if (
+      manifest &&
+      getFreshManifestForUri(rightUri) === manifest &&
+      (manifest.templates.has(leftPath) || manifest.templates.has(rightPath))
+    ) {
+      return areManifestTemplatesRelated(manifest, leftPath, rightPath);
+    }
+    return areEtaTemplatesRelated(leftPath, rightPath);
+  } catch {
+    return leftUri === rightUri;
+  }
+}
+
+function getResolvedTemplatePathLocations(
+  uri: string,
+  templateName: string,
+): Location[] | undefined {
+  try {
+    const resolutionOptions = getDocumentResolutionOptions(uri);
+    const target = resolveTemplatePath(templateName, {
+      fromFile: fileURLToPath(uri),
+      views: resolutionOptions?.views,
+      defaultExtension: resolutionOptions?.defaultExtension,
+      templateFiles: workspaceEtaFiles,
+    });
+    if (!target) return undefined;
+    const targetSource = ts.sys.readFile(target) ?? "";
+    return [
+      locationFromOffsets(
+        pathToFileURL(target).toString(),
+        targetSource,
+        0,
+        0,
+      ),
+    ];
+  } catch {
+    return [];
+  }
+}
+
+function getManifestTemplateNameLocations(
   uri: string,
   source: string,
-  options: EtaLanguageOptions,
-  offset: number,
-): Location[] {
-  const pathContext = getTemplatePathContextAtOffset(source, offset, options);
-  if (pathContext) {
-    try {
-      const resolutionOptions = getTemplateResolutionOptionsForUri(uri);
-      const target = resolveTemplatePath(pathContext.value, {
-        fromFile: fileURLToPath(uri),
-        views: resolutionOptions?.views,
-        defaultExtension: resolutionOptions?.defaultExtension,
-        templateFiles: workspaceEtaFiles,
-      });
-      if (target) {
-        const targetSource = ts.sys.readFile(target) ?? "";
-        return [locationFromOffsets(pathToFileURL(target).toString(), targetSource, 0, 0)];
-      }
-    } catch {
-      return [];
-    }
-  }
+  templateName: string,
+): Location[] | undefined {
+  const manifest = getFreshManifestForUri(uri, source);
+  if (!manifest) return undefined;
+  const manifestName = manifest.templateNames.get(templateName);
+  if (!manifestName) return undefined;
+  const manifestLocation = manifestName.definition ?? {
+    fileName: manifestName.fileName,
+    start: 0,
+    length: 0,
+  };
+  const location = locationFromManifestLocation(manifest, manifestLocation);
+  return location ? [location] : [];
+}
 
-  const blockContext = getBlockCallContextAtOffset(source, offset, options);
-  if (!blockContext) return [];
+function getRegisteredTemplateLocations(
+  templateName: string,
+): Location[] | undefined {
+  const registrations = templateRegistrationMap.get(templateName);
+  if (!registrations?.length) return undefined;
+  return registrations.flatMap((registration) => {
+    const location = locationFromFileOffsets(
+      registration.fileName,
+      registration.start,
+      registration.length,
+    );
+    return location ? [location] : [];
+  });
+}
+
+function getTemplatePathNavigationLocations(
+  uri: string,
+  source: string,
+  context: StringCallContext,
+): Location[] | undefined {
+  return (
+    getResolvedTemplatePathLocations(uri, context.value) ??
+    getManifestTemplateNameLocations(uri, source, context.value) ??
+    getRegisteredTemplateLocations(context.value)
+  );
+}
+
+function isMatchingBlockCandidate(
+  candidate: BlockCallContext,
+  selected: BlockCallContext,
+  sourceUri: string,
+  targetUri: string,
+): boolean {
+  return (
+    candidate.value === selected.value &&
+    (targetUri !== sourceUri || candidate.valueStart !== selected.valueStart)
+  );
+}
+
+function getBlockNavigationLocations(
+  uri: string,
+  blockContext: BlockCallContext,
+): Location[] {
   const matches: Array<Location & { declaration: boolean }> = [];
   for (const {
     uri: targetUri,
     source: targetSource,
   } of getWorkspaceEtaDocuments()) {
+    if (!areTemplateUrisRelated(uri, targetUri)) continue;
     const targetOptions = getDocumentLanguageOptions(targetUri);
     for (const candidate of getBlockCallContexts(targetSource, targetOptions)) {
-      if (
-        candidate.value !== blockContext.value ||
-        (targetUri === uri && candidate.valueStart === blockContext.valueStart)
-      ) {
+      if (!isMatchingBlockCandidate(candidate, blockContext, uri, targetUri)) {
         continue;
       }
       matches.push({
@@ -539,8 +866,32 @@ function getEtaNavigationLocations(
       });
     }
   }
-  matches.sort((left, right) => Number(right.declaration) - Number(left.declaration));
+  matches.sort(
+    (left, right) => Number(right.declaration) - Number(left.declaration),
+  );
   return matches.map(({ declaration: _, ...location }) => location);
+}
+
+function getEtaNavigationLocations(
+  uri: string,
+  source: string,
+  options: EtaLanguageOptions,
+  offset: number,
+): Location[] {
+  const pathContext = getTemplatePathContextAtOffset(source, offset, options);
+  let pathLocations: Location[] | undefined;
+  if (pathContext) {
+    pathLocations = getTemplatePathNavigationLocations(
+      uri,
+      source,
+      pathContext,
+    );
+  }
+  if (pathLocations !== undefined) return pathLocations;
+
+  const blockContext = getBlockCallContextAtOffset(source, offset, options);
+  if (!blockContext) return [];
+  return getBlockNavigationLocations(uri, blockContext);
 }
 
 function getTypeScriptDefinitionLocations(
@@ -560,6 +911,23 @@ function getTypeScriptDefinitionLocations(
   );
 }
 
+function getManifestSymbolLocations(
+  context: {
+    manifest: EtaLanguageSupportManifest;
+    symbol: EtaManifestSymbol;
+  },
+  includeDefinitions: boolean,
+): Location[] {
+  return context.symbol.occurrences.flatMap((occurrence) => {
+    if (!includeDefinitions && occurrence.role === "definition") return [];
+    const location = locationFromManifestLocation(
+      context.manifest,
+      occurrence,
+    );
+    return location ? [location] : [];
+  });
+}
+
 function getInferredDataDefinitionLocations(
   uri: string,
   virtual: VirtualPosition,
@@ -570,6 +938,16 @@ function getInferredDataDefinitionLocations(
     virtual.options,
   );
   if (!dataPath) return [];
+  const manifest = getFreshManifestForUri(uri, virtual.docText);
+  const manifestTemplate = getFreshManifestTemplate(uri, virtual.docText);
+  if (manifest && manifestTemplate) {
+    const pathKey = JSON.stringify(dataPath);
+    return manifestTemplate.dataDefinitions.flatMap((definition) => {
+      if (JSON.stringify(definition.dataPath) !== pathKey) return [];
+      const location = locationFromManifestLocation(manifest, definition);
+      return location ? [location] : [];
+    });
+  }
 
   return getDataDefinitionsForUri(uri, dataPath).flatMap((definition) => {
     const location = locationFromFileOffsets(
@@ -585,11 +963,25 @@ connection.onDefinition(
   (params: TextDocumentPositionParams): Location[] | null => {
     const virtual = getVirtualPosition(params);
     if (!virtual) return null;
-    const sourceOffset = positionToOffset(
+    const sourceOffset = virtual.sourceOffset;
+    const manifestSymbol = getManifestSymbolContext(
+      params.textDocument.uri,
       virtual.docText,
-      params.position.line,
-      params.position.character,
+      sourceOffset,
     );
+    if (manifestSymbol) {
+      const manifestLocations = manifestSymbol.symbol.occurrences
+        .filter((occurrence) => occurrence.role === "definition")
+        .flatMap((occurrence) => {
+          const location = locationFromManifestLocation(
+            manifestSymbol.manifest,
+            occurrence,
+          );
+          return location ? [location] : [];
+        });
+      if (manifestLocations.length > 0) return manifestLocations;
+    }
+
     const etaLocations = getEtaNavigationLocations(
       params.textDocument.uri,
       virtual.docText,
@@ -623,32 +1015,34 @@ function locationFromTypeScriptSpan(
   if (!virtualEntry) return undefined;
   const [uri] = virtualEntry;
   const document = documents.get(uri);
-  const virtualContent = virtualContents.get(fileName);
-  if (!document || virtualContent === undefined) return undefined;
-  const bodyStart = positionToOffset(
-    virtualContent,
-    virtualPreambleLines.get(fileName) ?? 0,
-    0,
-  );
-  if (start < bodyStart || start - bodyStart > document.getText().length) {
-    return undefined;
-  }
+  const sourceMap = virtualDocuments.get(fileName);
+  if (!document || !sourceMap) return undefined;
+  const sourceRange = virtualRangeToSource(sourceMap, start, length);
+  if (!sourceRange) return undefined;
   return locationFromOffsets(
     uri,
     document.getText(),
-    start - bodyStart,
-    length,
+    sourceRange.start,
+    sourceRange.length,
   );
 }
 
 connection.onReferences((params) => {
   const virtual = getVirtualPosition(params);
   if (!virtual) return [];
-  const sourceOffset = positionToOffset(
+  const sourceOffset = virtual.sourceOffset;
+  const manifestSymbol = getManifestSymbolContext(
+    params.textDocument.uri,
     virtual.docText,
-    params.position.line,
-    params.position.character,
+    sourceOffset,
   );
+  if (manifestSymbol) {
+    return getManifestSymbolLocations(
+      manifestSymbol,
+      params.context.includeDeclaration,
+    );
+  }
+
   const block = getBlockCallContextAtOffset(
     virtual.docText,
     sourceOffset,
@@ -704,13 +1098,34 @@ function appendRenameChange(
   edits.push(edit);
   changes[uri] = edits;
 }
+function getManifestRenameChanges(
+  context: {
+    manifest: EtaLanguageSupportManifest;
+    symbol: EtaManifestSymbol;
+  },
+  newName: string,
+): RenameChanges {
+  const changes: RenameChanges = {};
+  for (const location of getManifestSymbolLocations(context, true)) {
+    appendRenameChange(changes, location.uri, {
+      range: location.range,
+      newText: newName,
+    });
+  }
+  return changes;
+}
 
-function getBlockRenameChanges(blockName: string, newName: string): RenameChanges {
+function getBlockRenameChanges(
+  sourceUri: string,
+  blockName: string,
+  newName: string,
+): RenameChanges {
   const changes: RenameChanges = {};
   for (const {
     uri: targetUri,
     source: targetSource,
   } of getWorkspaceEtaDocuments()) {
+    if (!areTemplateUrisRelated(sourceUri, targetUri)) continue;
     for (const candidate of getBlockCallContexts(
       targetSource,
       getDocumentLanguageOptions(targetUri),
@@ -764,18 +1179,25 @@ function renameResult(changes: RenameChanges): { changes: RenameChanges } | null
 connection.onRenameRequest((params) => {
   const virtual = getVirtualPosition(params);
   if (!virtual) return null;
-  const sourceOffset = positionToOffset(
+  const sourceOffset = virtual.sourceOffset;
+  const manifestSymbol = getManifestSymbolContext(
+    params.textDocument.uri,
     virtual.docText,
-    params.position.line,
-    params.position.character,
+    sourceOffset,
   );
+  if (manifestSymbol) {
+    return renameResult(
+      getManifestRenameChanges(manifestSymbol, params.newName),
+    );
+  }
+
   const block = getBlockCallContextAtOffset(
     virtual.docText,
     sourceOffset,
     virtual.options,
   );
   const changes = block
-    ? getBlockRenameChanges(block.value, params.newName)
+    ? getBlockRenameChanges(params.textDocument.uri, block.value, params.newName)
     : getTypeScriptRenameChanges(virtual, params.newName);
   return renameResult(changes);
 });
@@ -871,19 +1293,38 @@ function getDiagnosticSeverity(
   return DiagnosticSeverity.Information;
 }
 
+function collectManifestDiagnostics(
+  uri: string,
+  source: string,
+): ServerDiagnostic[] {
+  const template = getFreshManifestTemplate(uri, source);
+  if (!template) return [];
+  const severity = {
+    error: DiagnosticSeverity.Error,
+    warning: DiagnosticSeverity.Warning,
+    information: DiagnosticSeverity.Information,
+    hint: DiagnosticSeverity.Hint,
+  } as const;
+  return template.diagnostics.map((diagnostic) => ({
+    range: locationFromOffsets(
+      uri,
+      source,
+      diagnostic.start,
+      diagnostic.length,
+    ).range,
+    message: diagnostic.message,
+    severity: severity[diagnostic.severity],
+    source: diagnostic.source,
+  }));
+}
+
 function collectTypeScriptDiagnostics(
   uri: string,
   source: string,
 ): ServerDiagnostic[] {
   const virtualPath = getVirtualPath(uri);
-  const virtualContent = virtualContents.get(virtualPath);
-  if (virtualContent === undefined) return [];
-
-  const bodyStart = positionToOffset(
-    virtualContent,
-    virtualPreambleLines.get(virtualPath) ?? 0,
-    0,
-  );
+  const sourceMap = virtualDocuments.get(virtualPath);
+  if (!sourceMap) return [];
   const languageService = getLanguageService();
   const typeScriptDiagnostics = [
     ...languageService.getSyntacticDiagnostics(virtualPath),
@@ -893,18 +1334,22 @@ function collectTypeScriptDiagnostics(
   for (const diagnostic of typeScriptDiagnostics) {
     if (
       diagnostic.start === undefined ||
-      diagnostic.length === undefined ||
-      diagnostic.start < bodyStart ||
-      diagnostic.start - bodyStart >= source.length
+      diagnostic.length === undefined
     ) {
       continue;
     }
+    const sourceRange = virtualRangeToSource(
+      sourceMap,
+      diagnostic.start,
+      diagnostic.length,
+    );
+    if (!sourceRange) continue;
     diagnostics.push({
       range: locationFromOffsets(
         uri,
         source,
-        diagnostic.start - bodyStart,
-        diagnostic.length,
+        sourceRange.start,
+        sourceRange.length,
       ).range,
       message: ts.flattenDiagnosticMessageText(diagnostic.messageText, "\n"),
       severity: getDiagnosticSeverity(diagnostic.category),
@@ -913,14 +1358,68 @@ function collectTypeScriptDiagnostics(
   }
   return diagnostics;
 }
+function collectRuntimeJavaScriptDiagnostics(
+  uri: string,
+  source: string,
+  options: EtaLanguageOptions,
+): ServerDiagnostic[] {
+  const virtual = buildRuntimeVirtualDocument(source, options);
+  const bodyStart = positionToOffset(
+    virtual.content,
+    virtual.preambleLineCount,
+    0,
+  );
+  const result = ts.transpileModule(virtual.content, {
+    compilerOptions: {
+      allowJs: true,
+      checkJs: true,
+      noEmit: true,
+      target: ts.ScriptTarget.ES2020,
+    },
+    fileName: "eta-template.js",
+    reportDiagnostics: true,
+  });
+  return (result.diagnostics ?? []).flatMap((diagnostic) => {
+    if (
+      diagnostic.start === undefined ||
+      diagnostic.length === undefined ||
+      diagnostic.start < bodyStart ||
+      diagnostic.start - bodyStart >= source.length
+    ) {
+      return [];
+    }
+    return [
+      {
+        range: locationFromOffsets(
+          uri,
+          source,
+          diagnostic.start - bodyStart,
+          diagnostic.length,
+        ).range,
+        message: ts.flattenDiagnosticMessageText(
+          diagnostic.messageText,
+          "\n",
+        ),
+        severity: getDiagnosticSeverity(diagnostic.category),
+        source: "JavaScript",
+      },
+    ];
+  });
+}
 
 function publishDiagnostics(uri: string): void {
   const document = documents.get(uri);
   if (!document) return;
   const source = document.getText();
+  const options = getDocumentLanguageOptions(uri);
+  const manifestTemplate = getFreshManifestTemplate(uri, source);
   const diagnostics = [
-    ...collectEtaDiagnostics(uri, source, getDocumentLanguageOptions(uri)),
+    ...collectEtaDiagnostics(uri, source, options),
     ...collectTypeScriptDiagnostics(uri, source),
+    ...collectManifestDiagnostics(uri, source),
+    ...(manifestTemplate
+      ? []
+      : collectRuntimeJavaScriptDiagnostics(uri, source, options)),
   ];
   connection.sendDiagnostics({ uri, diagnostics });
 }
@@ -930,15 +1429,46 @@ connection.languages.semanticTokens.on((params) => {
   if (!document) return { data: [] };
   const source = document.getText();
   const options = getDocumentLanguageOptions(params.textDocument.uri);
-  const tokens: Array<{ line: number; character: number; length: number }> = [];
-  for (const range of findEtaTagRanges(source, options)) {
-    for (const prefix of options.customTags) {
-      const token = `${options.tags[0]}${prefix}`;
-      if (!source.startsWith(token, range.start)) continue;
-      const position = offsetToPosition(source, range.start);
-      tokens.push({ ...position, length: token.length });
+  const virtualPath = getVirtualPath(params.textDocument.uri);
+  activateWorkspaceProject(params.textDocument.uri);
+  updateVirtualFile(params.textDocument.uri, source);
+  const virtualDocument = virtualDocuments.get(virtualPath);
+  if (!virtualDocument) return { data: [] };
+
+  const tokens = collectEtaSemanticTokens(
+    getLanguageService(),
+    virtualPath,
+    virtualDocument,
+    source,
+    options,
+  ).flatMap((token) => {
+    const parts: Array<{
+      line: number;
+      character: number;
+      length: number;
+      tokenType: number;
+    }> = [];
+    const end = token.start + token.length;
+    let start = token.start;
+    while (start < end) {
+      const newline = source.indexOf("\n", start);
+      const physicalEnd = newline < 0 || newline >= end ? end : newline;
+      const lineEnd =
+        physicalEnd > start && source[physicalEnd - 1] === "\r"
+          ? physicalEnd - 1
+          : physicalEnd;
+      if (lineEnd > start) {
+        parts.push({
+          ...offsetToPosition(source, start),
+          length: lineEnd - start,
+          tokenType: token.tokenType,
+        });
+      }
+      if (newline < 0 || newline >= end) break;
+      start = newline + 1;
     }
-  }
+    return parts;
+  });
   tokens.sort(
     (left, right) =>
       left.line - right.line || left.character - right.character,
@@ -950,7 +1480,13 @@ connection.languages.semanticTokens.on((params) => {
     const deltaLine = token.line - previousLine;
     const deltaCharacter =
       deltaLine === 0 ? token.character - previousCharacter : token.character;
-    data.push(deltaLine, deltaCharacter, token.length, 0, 0);
+    data.push(
+      deltaLine,
+      deltaCharacter,
+      token.length,
+      token.tokenType,
+      0,
+    );
     previousLine = token.line;
     previousCharacter = token.character;
   }

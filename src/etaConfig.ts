@@ -4,14 +4,23 @@ export interface EtaParseOptions {
   raw: string;
 }
 
+export type EtaTrimMode = "nl" | "slurp" | false;
+export type EtaCustomTagType = "javascript" | "text";
+
 export interface EtaLanguageOptions {
   tags: [string, string];
   parse: EtaParseOptions;
   customTags: string[];
+  customTagTypes?: Record<string, EtaCustomTagType>;
   varName: string;
   useWith: boolean;
   functionHeader: string;
   outputFunctionName?: string;
+  async?: boolean;
+  autoEscape?: boolean;
+  autoFilter?: boolean;
+  autoTrim?: EtaTrimMode | [EtaTrimMode, EtaTrimMode];
+  rmWhitespace?: boolean;
 }
 
 export const DEFAULT_ETA_LANGUAGE_OPTIONS: EtaLanguageOptions = {
@@ -25,6 +34,12 @@ export const DEFAULT_ETA_LANGUAGE_OPTIONS: EtaLanguageOptions = {
   varName: "it",
   useWith: false,
   functionHeader: "",
+  customTagTypes: {},
+  async: false,
+  autoEscape: true,
+  autoFilter: false,
+  autoTrim: [false, "nl"],
+  rmWhitespace: false,
   outputFunctionName: "output",
 };
 
@@ -37,13 +52,24 @@ function asBoolean(value: unknown, fallback: boolean): boolean {
 }
 
 function asStringArray(value: unknown, fallback: string[]): string[] {
-  if (!Array.isArray(value)) return fallback;
-  return value.filter((item): item is string => typeof item === "string");
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string");
+  }
+  return value && typeof value === "object"
+    ? Object.keys(value)
+    : fallback;
 }
 
 function normalizeTags(value: unknown): [string, string] {
-  if (!Array.isArray(value)) return DEFAULT_ETA_LANGUAGE_OPTIONS.tags;
-  const [open, close] = value;
+  let values: unknown[] = [];
+  if (Array.isArray(value)) {
+    values = value;
+  } else if (value && typeof value === "object") {
+    const tags = value as Record<string, unknown>;
+    values = [tags.open, tags.close];
+  }
+
+  const [open, close] = values;
   return [
     asString(open, DEFAULT_ETA_LANGUAGE_OPTIONS.tags[0]) ||
       DEFAULT_ETA_LANGUAGE_OPTIONS.tags[0],
@@ -52,36 +78,110 @@ function normalizeTags(value: unknown): [string, string] {
   ];
 }
 
+function applyNonDefaultParseOptions(
+  result: EtaLanguageOptions,
+  override: EtaLanguageOptions,
+): void {
+  if (override.parse.exec !== DEFAULT_ETA_LANGUAGE_OPTIONS.parse.exec) {
+    result.parse.exec = override.parse.exec;
+  }
+  if (
+    override.parse.interpolate !==
+    DEFAULT_ETA_LANGUAGE_OPTIONS.parse.interpolate
+  ) {
+    result.parse.interpolate = override.parse.interpolate;
+  }
+  if (override.parse.raw !== DEFAULT_ETA_LANGUAGE_OPTIONS.parse.raw) {
+    result.parse.raw = override.parse.raw;
+  }
+}
+
+function asTrimMode(value: unknown): EtaTrimMode | undefined {
+  return value === false || value === "nl" || value === "slurp"
+    ? value
+    : undefined;
+}
+
+function normalizeAutoTrim(
+  value: unknown,
+): EtaTrimMode | [EtaTrimMode, EtaTrimMode] {
+  if (Array.isArray(value)) {
+    const before = asTrimMode(value[0]);
+    const after = asTrimMode(value[1]);
+    if (before !== undefined && after !== undefined) return [before, after];
+  }
+  return (
+    asTrimMode(value) ??
+    DEFAULT_ETA_LANGUAGE_OPTIONS.autoTrim ??
+    [false, "nl"]
+  );
+}
+
+function normalizeCustomTagTypes(
+  value: unknown,
+): Record<string, EtaCustomTagType> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, EtaCustomTagType] =>
+        entry[1] === "javascript" || entry[1] === "text",
+    ),
+  );
+}
+
 export function normalizeEtaLanguageOptions(
-  value: Partial<EtaLanguageOptions> = {},
+  value: unknown = {},
 ): EtaLanguageOptions {
+  const config =
+    value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : {};
+  const parse =
+    config.parse && typeof config.parse === "object"
+      ? (config.parse as Record<string, unknown>)
+      : {};
   return {
-    tags: normalizeTags(value.tags),
+    tags: normalizeTags(config.tags),
     parse: {
-      exec: asString(value.parse?.exec, DEFAULT_ETA_LANGUAGE_OPTIONS.parse.exec),
+      exec: asString(parse.exec, DEFAULT_ETA_LANGUAGE_OPTIONS.parse.exec),
       interpolate: asString(
-        value.parse?.interpolate,
+        parse.interpolate,
         DEFAULT_ETA_LANGUAGE_OPTIONS.parse.interpolate,
       ),
-      raw: asString(value.parse?.raw, DEFAULT_ETA_LANGUAGE_OPTIONS.parse.raw),
+      raw: asString(parse.raw, DEFAULT_ETA_LANGUAGE_OPTIONS.parse.raw),
     },
     customTags: asStringArray(
-      value.customTags,
+      config.customTags,
       DEFAULT_ETA_LANGUAGE_OPTIONS.customTags,
     ),
+    customTagTypes: normalizeCustomTagTypes(config.customTagTypes),
     varName:
-      asString(value.varName, DEFAULT_ETA_LANGUAGE_OPTIONS.varName).trim() ||
+      asString(config.varName, DEFAULT_ETA_LANGUAGE_OPTIONS.varName).trim() ||
       DEFAULT_ETA_LANGUAGE_OPTIONS.varName,
-    useWith: asBoolean(value.useWith, DEFAULT_ETA_LANGUAGE_OPTIONS.useWith),
+    useWith: asBoolean(config.useWith, DEFAULT_ETA_LANGUAGE_OPTIONS.useWith),
     functionHeader: asString(
-      value.functionHeader,
+      config.functionHeader,
       DEFAULT_ETA_LANGUAGE_OPTIONS.functionHeader,
     ),
     outputFunctionName:
       asString(
-        value.outputFunctionName,
+        config.outputFunctionName,
         DEFAULT_ETA_LANGUAGE_OPTIONS.outputFunctionName ?? "output",
       ).trim() || DEFAULT_ETA_LANGUAGE_OPTIONS.outputFunctionName,
+    async: asBoolean(config.async, DEFAULT_ETA_LANGUAGE_OPTIONS.async ?? false),
+    autoEscape: asBoolean(
+      config.autoEscape,
+      DEFAULT_ETA_LANGUAGE_OPTIONS.autoEscape ?? true,
+    ),
+    autoFilter: asBoolean(
+      config.autoFilter,
+      DEFAULT_ETA_LANGUAGE_OPTIONS.autoFilter ?? false,
+    ),
+    autoTrim: normalizeAutoTrim(config.autoTrim),
+    rmWhitespace: asBoolean(
+      config.rmWhitespace,
+      DEFAULT_ETA_LANGUAGE_OPTIONS.rmWhitespace ?? false,
+    ),
   };
 }
 
@@ -97,51 +197,83 @@ export function applyNonDefaultEtaLanguageOptions(
   base: EtaLanguageOptions,
   override: EtaLanguageOptions,
 ): EtaLanguageOptions {
+  const normalizedBase = normalizeEtaLanguageOptions(base);
+  const normalizedOverride = normalizeEtaLanguageOptions(override);
   const result: EtaLanguageOptions = {
-    tags: [...base.tags],
-    parse: { ...base.parse },
-    customTags: [...base.customTags],
-    varName: base.varName,
-    useWith: base.useWith,
-    functionHeader: base.functionHeader,
-    outputFunctionName: base.outputFunctionName,
+    tags: [...normalizedBase.tags],
+    parse: { ...normalizedBase.parse },
+    customTags: [...normalizedBase.customTags],
+    customTagTypes: { ...normalizedBase.customTagTypes },
+    varName: normalizedBase.varName,
+    useWith: normalizedBase.useWith,
+    functionHeader: normalizedBase.functionHeader,
+    async: normalizedBase.async,
+    outputFunctionName: normalizedBase.outputFunctionName,
+    autoEscape: normalizedBase.autoEscape,
+    autoFilter: normalizedBase.autoFilter,
+    autoTrim: Array.isArray(normalizedBase.autoTrim)
+      ? [...normalizedBase.autoTrim]
+      : normalizedBase.autoTrim,
+    rmWhitespace: normalizedBase.rmWhitespace,
   };
 
-  if (!tagsEqual(override.tags, DEFAULT_ETA_LANGUAGE_OPTIONS.tags)) {
-    result.tags = [...override.tags];
+  if (!tagsEqual(normalizedOverride.tags, DEFAULT_ETA_LANGUAGE_OPTIONS.tags)) {
+    result.tags = [...normalizedOverride.tags];
   }
-  if (override.parse.exec !== DEFAULT_ETA_LANGUAGE_OPTIONS.parse.exec) {
-    result.parse.exec = override.parse.exec;
-  }
+  applyNonDefaultParseOptions(result, normalizedOverride);
   if (
-    override.parse.interpolate !==
-    DEFAULT_ETA_LANGUAGE_OPTIONS.parse.interpolate
+    !arraysEqual(
+      normalizedOverride.customTags,
+      DEFAULT_ETA_LANGUAGE_OPTIONS.customTags,
+    )
   ) {
-    result.parse.interpolate = override.parse.interpolate;
+    result.customTags = [...normalizedOverride.customTags];
   }
-  if (override.parse.raw !== DEFAULT_ETA_LANGUAGE_OPTIONS.parse.raw) {
-    result.parse.raw = override.parse.raw;
+  if (Object.keys(normalizedOverride.customTagTypes ?? {}).length > 0) {
+    result.customTagTypes = { ...normalizedOverride.customTagTypes };
+  }
+  if (normalizedOverride.varName !== DEFAULT_ETA_LANGUAGE_OPTIONS.varName) {
+    result.varName = normalizedOverride.varName;
+  }
+  if (normalizedOverride.useWith !== DEFAULT_ETA_LANGUAGE_OPTIONS.useWith) {
+    result.useWith = normalizedOverride.useWith;
   }
   if (
-    !arraysEqual(override.customTags, DEFAULT_ETA_LANGUAGE_OPTIONS.customTags)
+    normalizedOverride.functionHeader !==
+    DEFAULT_ETA_LANGUAGE_OPTIONS.functionHeader
   ) {
-    result.customTags = [...override.customTags];
-  }
-  if (override.varName !== DEFAULT_ETA_LANGUAGE_OPTIONS.varName) {
-    result.varName = override.varName;
-  }
-  if (override.useWith !== DEFAULT_ETA_LANGUAGE_OPTIONS.useWith) {
-    result.useWith = override.useWith;
-  }
-  if (override.functionHeader !== DEFAULT_ETA_LANGUAGE_OPTIONS.functionHeader) {
-    result.functionHeader = override.functionHeader;
+    result.functionHeader = normalizedOverride.functionHeader;
   }
   if (
-    (override.outputFunctionName ??
-      DEFAULT_ETA_LANGUAGE_OPTIONS.outputFunctionName) !==
+    normalizedOverride.outputFunctionName !==
     DEFAULT_ETA_LANGUAGE_OPTIONS.outputFunctionName
   ) {
-    result.outputFunctionName = override.outputFunctionName;
+    result.outputFunctionName = normalizedOverride.outputFunctionName;
+  }
+  if (normalizedOverride.async !== DEFAULT_ETA_LANGUAGE_OPTIONS.async) {
+    result.async = normalizedOverride.async;
+  }
+  if (
+    normalizedOverride.autoEscape !== DEFAULT_ETA_LANGUAGE_OPTIONS.autoEscape
+  ) {
+    result.autoEscape = normalizedOverride.autoEscape;
+  }
+  if (
+    normalizedOverride.autoFilter !== DEFAULT_ETA_LANGUAGE_OPTIONS.autoFilter
+  ) {
+    result.autoFilter = normalizedOverride.autoFilter;
+  }
+  if (
+    JSON.stringify(normalizedOverride.autoTrim) !==
+    JSON.stringify(DEFAULT_ETA_LANGUAGE_OPTIONS.autoTrim)
+  ) {
+    result.autoTrim = normalizedOverride.autoTrim;
+  }
+  if (
+    normalizedOverride.rmWhitespace !==
+    DEFAULT_ETA_LANGUAGE_OPTIONS.rmWhitespace
+  ) {
+    result.rmWhitespace = normalizedOverride.rmWhitespace;
   }
 
   return result;
@@ -152,7 +284,10 @@ export function getTagPrefixCandidates(options: EtaLanguageOptions): string[] {
     options.parse.interpolate,
     options.parse.raw,
     options.parse.exec,
-    ...options.customTags,
+    ...new Set([
+      ...options.customTags,
+      ...Object.keys(options.customTagTypes ?? {}),
+    ]),
   ]
     .filter((prefix) => prefix.length > 0)
     .sort((a, b) => b.length - a.length);
@@ -165,6 +300,7 @@ export function isJavaScriptTagPrefix(
   return (
     prefix === options.parse.exec ||
     prefix === options.parse.interpolate ||
-    prefix === options.parse.raw
+    prefix === options.parse.raw ||
+    options.customTagTypes?.[prefix] === "javascript"
   );
 }

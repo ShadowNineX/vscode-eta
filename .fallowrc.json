@@ -1,3 +1,4 @@
 {
-  "entry": ["demo/scenarios/*/src/index.ts"]
+  "entry": ["demo/scenarios/*/src/index.ts"],
+  "ignoreDependencies": ["@vscode/test-electron"]
 }

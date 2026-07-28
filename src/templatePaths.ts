@@ -17,6 +17,43 @@ export function canonicalTemplatePath(fileName: string): string {
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
+function isCanonicalPathWithinRoot(fileName: string, root: string): boolean {
+  const relative = path.relative(root, fileName);
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
+}
+
+export function isFileWithinRoot(fileName: string, root: string): boolean {
+  return isCanonicalPathWithinRoot(
+    canonicalTemplatePath(fileName),
+    canonicalTemplatePath(root),
+  );
+}
+
+export function findMostSpecificContainingRoot<T extends { root: string }>(
+  fileName: string,
+  candidates: Iterable<T>,
+): T | undefined {
+  const normalizedFileName = canonicalTemplatePath(fileName);
+  let selected: T | undefined;
+  let selectedRootLength = -1;
+  for (const candidate of candidates) {
+    const candidateRoot = canonicalTemplatePath(candidate.root);
+    if (
+      isCanonicalPathWithinRoot(normalizedFileName, candidateRoot) &&
+      candidateRoot.length > selectedRootLength
+    ) {
+      selected = candidate;
+      selectedRootLength = candidateRoot.length;
+    }
+  }
+  return selected;
+}
+
 export interface TemplateResolutionContext {
   fromFile: string;
   views?: string;

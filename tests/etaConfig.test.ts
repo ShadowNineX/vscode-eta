@@ -58,6 +58,43 @@ describe("normalizeEtaLanguageOptions", () => {
     expect(options.functionHeader).toBe("const helper = data.user.name");
     expect(options.outputFunctionName).toBe("print");
   });
+  it("normalizes live VS Code settings and runtime parity options", () => {
+    const options = normalizeEtaLanguageOptions({
+      tags: { open: "{{", close: "}}" },
+      customTags: { "#": "runtime handler" },
+      customTagTypes: {
+        "#": "text",
+        "@": "javascript",
+        invalid: "html",
+      },
+      async: true,
+      autoEscape: false,
+      autoFilter: true,
+      autoTrim: ["slurp", false],
+      rmWhitespace: true,
+    });
+
+    expect(options.tags).toEqual(["{{", "}}"]);
+    expect(options.customTags).toEqual(["#"]);
+    expect(options.customTagTypes).toEqual({
+      "#": "text",
+      "@": "javascript",
+    });
+    expect(options).toMatchObject({
+      async: true,
+      autoEscape: false,
+      autoFilter: true,
+      autoTrim: ["slurp", false],
+      rmWhitespace: true,
+    });
+  });
+
+  it("rejects invalid automatic trim values", () => {
+    expect(
+      normalizeEtaLanguageOptions({ autoTrim: ["all", true] }).autoTrim,
+    ).toEqual(DEFAULT_ETA_LANGUAGE_OPTIONS.autoTrim);
+  });
+
 });
 
 describe("applyNonDefaultEtaLanguageOptions", () => {
@@ -90,6 +127,24 @@ describe("applyNonDefaultEtaLanguageOptions", () => {
     expect(merged.tags).toEqual(["{{", "}}"]);
     expect(merged.varName).toBe("view");
     expect(merged.outputFunctionName).toBe("echo");
+    const parityOverride = normalizeEtaLanguageOptions({
+      async: true,
+      autoEscape: false,
+      autoFilter: true,
+      autoTrim: "slurp",
+      rmWhitespace: true,
+      customTagTypes: { "@": "javascript" },
+    });
+    expect(
+      applyNonDefaultEtaLanguageOptions(inferred, parityOverride),
+    ).toMatchObject({
+      async: true,
+      autoEscape: false,
+      autoFilter: true,
+      autoTrim: "slurp",
+      rmWhitespace: true,
+      customTagTypes: { "@": "javascript" },
+    });
   });
 });
 
@@ -122,5 +177,10 @@ describe("isJavaScriptTagPrefix", () => {
     expect(isJavaScriptTagPrefix(":", options)).toBe(true);
     expect(isJavaScriptTagPrefix("!", options)).toBe(true);
     expect(isJavaScriptTagPrefix("#", options)).toBe(false);
+    const typedCustom = normalizeEtaLanguageOptions({
+      customTagTypes: { "@": "javascript", "#": "text" },
+    });
+    expect(isJavaScriptTagPrefix("@", typedCustom)).toBe(true);
+    expect(isJavaScriptTagPrefix("#", typedCustom)).toBe(false);
   });
 });

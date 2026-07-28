@@ -2,11 +2,16 @@
 
 ## Unreleased
 
-- Added Eta helper signature help, TypeScript diagnostics, references, rename, and semantic tokens for configured custom tags.
-- Added include/layout path completion and navigation plus named-block navigation.
-- Made template inference collision-safe with resolved paths, workspace `tsconfig.json`/`jsconfig.json` options, multiple workspace folders, template literals, `withConfig`, and symbol-aware render detection.
-- Propagated inherited and explicit include/layout data across templates.
-- Matched Eta runtime behavior for line-comment delimiters, custom `varName`, raw multiline `functionHeader`, and output coercion; diagnostics now identify unclosed strings and block comments.
+## 0.3.0
+
+- Aligned scanner and virtual-document behavior with Eta 4.6 multiline openers, adjacent-tag boundaries, generated function scope, async templates, render options, and JavaScript runtime syntax.
+- Hardened render inference with Eta symbol provenance, project-aware excluded-file analysis, sound multi-call unions, include/layout override precedence, valid quoted properties, aliases, destructuring, configured instances, and `loadTemplate` registrations.
+- Scoped block navigation to related layout trees, retained explicit child-data definitions, added `.mts`/`.cts`/`.mjs`/`.cjs` scanning, handled workspace-folder changes, and released closed virtual documents.
+- Normalized live configuration updates and modeled `async`, automatic escape/filter/trim behavior, whitespace removal, and safe custom-tag language metadata.
+- Consolidated completion and hover in the language server, embedded VS Code's standard HTML/JavaScript TextMate scopes, supported Eta tags inside HTML attributes, and fixed the async block snippet.
+- Added Eta-runtime differential tests, real TextMate tokenization, bundled stdio LSP smoke coverage, and a real VS Code extension-host suite for production providers and snippet expansion.
+- Added a strictly validated, hash-fresh `.eta-language-support.json` bridge for runtime-derived options, transformed virtual TypeScript, source maps, data definitions, diagnostics, template names, relationships, and cross-file symbol navigation without executing project code.
+- Expanded language-server semantic tokens from custom-prefix markers to JavaScript classification inside every configured JavaScript tag, including dynamically selected delimiters and manifest-mapped transformed code.
 
 ## 0.2.1
 

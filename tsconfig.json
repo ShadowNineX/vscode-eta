@@ -3,7 +3,7 @@
     "module": "ESNext",
     "moduleResolution": "Bundler",
     "target": "ES2020",
-    "lib": ["ES2021", "dom"],
+    "lib": ["ES2021", "ES2022.Object", "dom"],
     "outDir": "./out",
     "rootDir": ".",
     "strict": true,

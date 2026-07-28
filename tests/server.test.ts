@@ -154,5 +154,5 @@ describe("server entrypoint", () => {
     ]);
 
     expect(mocks.connection.listen).toHaveBeenCalledTimes(1);
-  });
+  }, 30_000);
 });

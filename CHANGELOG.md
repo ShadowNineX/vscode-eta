@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.0
+
+- Added Ctrl-click and Go to Definition for Eta-local variables and inferred render data, including nested properties, arrays, layouts, custom `varName`, and `useWith`.
+
 ## 0.1.3
 
 - Fixed packaged-extension TypeScript IntelliSense by copying TypeScript standard library declarations into `out/` during the build.

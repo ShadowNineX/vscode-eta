@@ -3,13 +3,15 @@ import * as ts from "typescript";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { DEFAULT_IT_TYPE } from "../src/virtualDocument";
 import {
   analyzeEtaTemplateLayouts,
   analyzeFileForEtaCalls,
+  getDataDefinitionsForUri,
   getItTypeForUri,
   scanWorkspaceFiles,
+  templateDataDefinitionMap,
   templateDataTypeMap,
   templateLanguageOptionsMap,
   typeToStructuralString,
@@ -196,6 +198,7 @@ describe("typeToStructuralString", () => {
 describe("analyzeFileForEtaCalls", () => {
   beforeEach(() => {
     templateDataTypeMap.clear();
+    templateDataDefinitionMap.clear();
     templateLanguageOptionsMap.clear();
   });
 
@@ -208,6 +211,31 @@ describe("analyzeFileForEtaCalls", () => {
     const result = templateDataTypeMap.get("user");
     expect(result).toMatch(/name: string/);
     expect(result).toMatch(/age: number/);
+  });
+
+  it("records source declarations for root and nested render data", () => {
+    const { checker, sf } = makeTestProgram(
+      `declare function render(t: string, d: unknown): string;
+       const payload = {
+         user: { name: "Ada" },
+         items: [{ title: "First" }]
+       };
+       render("profile", payload);`,
+    );
+    analyzeFileForEtaCalls(sf, checker);
+    const uri = pathToFileURL(path.join(process.cwd(), "profile.eta")).toString();
+    const sourceTexts = (dataPath: string[]) =>
+      getDataDefinitionsForUri(uri, dataPath).map((definition) =>
+        sf.text.slice(
+          definition.start,
+          definition.start + definition.length,
+        ),
+      );
+
+    expect(sourceTexts([])).toEqual(["payload"]);
+    expect(sourceTexts(["user"])).toContain("user");
+    expect(sourceTexts(["user", "name"])).toContain("name");
+    expect(sourceTexts(["items", "title"])).toContain("title");
   });
 
   it("ignores renderString() because it renders inline template source", () => {
@@ -303,12 +331,28 @@ describe("analyzeFileForEtaCalls", () => {
       "email-verify",
       "{ title: string; ctaUrl: string }",
     );
+    const titleDefinition = {
+      fileName: path.join(dir, "render.ts"),
+      start: 12,
+      length: 5,
+    };
+    templateDataDefinitionMap.set(
+      "email-verify",
+      new Map([
+        [JSON.stringify(["title"]), [titleDefinition]],
+      ]),
+    );
     analyzeEtaTemplateLayouts([childPath, layoutPath]);
 
     const type = templateDataTypeMap.get("email-base");
     expect(type).toMatch(/title: string/);
     expect(type).toMatch(/ctaUrl: string/);
     expect(type).toMatch(/body: string/);
+    expect(
+      templateDataDefinitionMap
+        .get("email-base")
+        ?.get(JSON.stringify(["title"])),
+    ).toEqual([titleDefinition]);
   });
 
   it("does not propagate dynamic layout names", () => {
@@ -442,6 +486,7 @@ describe("analyzeFileForEtaCalls", () => {
 describe("getItTypeForUri", () => {
   beforeEach(() => {
     templateDataTypeMap.clear();
+    templateDataDefinitionMap.clear();
     templateLanguageOptionsMap.clear();
   });
 
@@ -476,6 +521,7 @@ describe("getItTypeForUri", () => {
 describe("Integration: real eta package type inference", () => {
   beforeEach(() => {
     templateDataTypeMap.clear();
+    templateDataDefinitionMap.clear();
     templateLanguageOptionsMap.clear();
   });
 
@@ -613,6 +659,7 @@ describe("scanWorkspaceFiles", () => {
 describe("greeting vs dashboard type isolation", () => {
   beforeEach(() => {
     templateDataTypeMap.clear();
+    templateDataDefinitionMap.clear();
     templateLanguageOptionsMap.clear();
   });
 
@@ -726,6 +773,7 @@ describe("greeting vs dashboard type isolation", () => {
 describe("complex type inference — unit tests via makeTestProgram", () => {
   beforeEach(() => {
     templateDataTypeMap.clear();
+    templateDataDefinitionMap.clear();
     templateLanguageOptionsMap.clear();
   });
 
@@ -867,6 +915,7 @@ describe("complex type inference — integration with real demo/src/index.ts", (
 
   beforeAll(() => {
     templateDataTypeMap.clear();
+    templateDataDefinitionMap.clear();
     templateLanguageOptionsMap.clear();
     const demoIndexPath = fileURLToPath(
       new URL("../demo/src/index.ts", import.meta.url),
@@ -979,6 +1028,7 @@ describe("complex type inference — integration with real demo/src/index.ts", (
 describe("demo scenarios from Eta docs", () => {
   beforeAll(() => {
     templateDataTypeMap.clear();
+    templateDataDefinitionMap.clear();
     templateLanguageOptionsMap.clear();
     const demoRoot = fileURLToPath(new URL("../demo", import.meta.url));
     const rootNames = ts.sys

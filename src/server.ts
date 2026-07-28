@@ -8,13 +8,15 @@ import {
   InitializeResult,
   FileChangeType,
   Hover,
+  Location,
   MarkupKind,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import ts from "typescript";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildVirtualContent, PREAMBLE_LINE_COUNT } from "./virtualDocument";
+import { getEtaDataPathAtPosition, offsetToPosition } from "./definition";
 import { isInsideEtaTagInText, positionToOffset } from "./position";
 import { tsKindToLSP } from "./lspKind";
 import { createServerLogger } from "./logging";
@@ -27,9 +29,11 @@ import {
 import {
   analyzeWorkspaceFiles,
   getEtaLanguageOptionsForUri,
+  getDataDefinitionsForUri,
   getItTypeForUri,
   scanWorkspaceFiles,
   templateDataTypeMap,
+  templateDataDefinitionMap,
   templateLanguageOptionsMap,
   workspaceEtaFiles,
   workspaceTsFiles,
@@ -57,11 +61,13 @@ export { tsKindToLSP } from "./lspKind";
 export {
   analyzeFileForEtaCalls,
   analyzeEtaTemplateLayouts,
+  getDataDefinitionsForUri,
   analyzeWorkspaceFiles,
   getEtaLanguageOptionsForUri,
   getItTypeForUri,
   scanWorkspaceFiles,
   templateDataTypeMap,
+  templateDataDefinitionMap,
   templateLanguageOptionsMap,
   workspaceEtaFiles,
   typeToStructuralString,
@@ -101,6 +107,7 @@ function ensureWorkspaceAnalyzed(): void {
 
 function runWorkspaceAnalysis(): void {
   templateDataTypeMap.clear();
+  templateDataDefinitionMap.clear();
   templateLanguageOptionsMap.clear();
   serviceVersion++;
 
@@ -241,6 +248,7 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
         triggerCharacters: [".", "(", '"', "'", "{", "<"],
       },
       hoverProvider: true,
+      definitionProvider: true,
     },
   };
 });
@@ -331,6 +339,125 @@ connection.onCompletion((params: TextDocumentPositionParams) => {
     detail: entry.kindModifiers || undefined,
   }));
 });
+
+function locationFromOffsets(
+  uri: string,
+  content: string,
+  start: number,
+  length: number,
+): Location {
+  return {
+    uri,
+    range: {
+      start: offsetToPosition(content, start),
+      end: offsetToPosition(content, start + length),
+    },
+  };
+}
+
+connection.onDefinition(
+  (params: TextDocumentPositionParams): Location[] | null => {
+    const doc = documents.get(params.textDocument.uri);
+    if (!doc) return null;
+
+    const docText = doc.getText();
+    const options = getDocumentLanguageOptions(params.textDocument.uri);
+    if (
+      !isInsideEtaTagInText(
+        docText,
+        params.position.line,
+        params.position.character,
+        options,
+      )
+    ) {
+      return null;
+    }
+
+    const virtualPath = getVirtualPath(params.textDocument.uri);
+    updateVirtualFile(params.textDocument.uri, docText);
+    const virtualContent = virtualContents.get(virtualPath) ?? "";
+    const virtualOffset = positionToOffset(
+      virtualContent,
+      params.position.line + PREAMBLE_LINE_COUNT,
+      params.position.character,
+    );
+    const virtualBodyStart = positionToOffset(
+      virtualContent,
+      PREAMBLE_LINE_COUNT,
+      0,
+    );
+
+    const locations: Location[] = [];
+    for (const definition of
+      getLanguageService().getDefinitionAtPosition(
+        virtualPath,
+        virtualOffset,
+      ) ?? []) {
+      if (definition.fileName === virtualPath) {
+        if (definition.textSpan.start < virtualBodyStart) continue;
+        locations.push(
+          locationFromOffsets(
+            params.textDocument.uri,
+            docText,
+            definition.textSpan.start - virtualBodyStart,
+            definition.textSpan.length,
+          ),
+        );
+        continue;
+      }
+
+      const fileName = path.isAbsolute(definition.fileName)
+        ? definition.fileName
+        : path.resolve(
+            workspaceRoot ?? process.cwd(),
+            definition.fileName,
+          );
+      const content = ts.sys.readFile(fileName);
+      if (content !== undefined) {
+        locations.push(
+          locationFromOffsets(
+            pathToFileURL(fileName).toString(),
+            content,
+            definition.textSpan.start,
+            definition.textSpan.length,
+          ),
+        );
+      }
+    }
+    if (locations.length > 0) return locations;
+
+    const dataPath = getEtaDataPathAtPosition(
+      virtualContent,
+      virtualOffset,
+      options,
+    );
+    if (!dataPath) return null;
+
+    for (const definition of getDataDefinitionsForUri(
+      params.textDocument.uri,
+      dataPath,
+    )) {
+      const fileName = path.isAbsolute(definition.fileName)
+        ? definition.fileName
+        : path.resolve(
+            workspaceRoot ?? process.cwd(),
+            definition.fileName,
+          );
+      const content = ts.sys.readFile(fileName);
+      if (content !== undefined) {
+        locations.push(
+          locationFromOffsets(
+            pathToFileURL(fileName).toString(),
+            content,
+            definition.start,
+            definition.length,
+          ),
+        );
+      }
+    }
+    return locations.length > 0 ? locations : null;
+  },
+);
 
 connection.onHover((params: TextDocumentPositionParams): Hover | null => {
   const doc = documents.get(params.textDocument.uri);

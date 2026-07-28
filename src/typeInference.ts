@@ -19,6 +19,18 @@ export const templateDataTypeMap = new Map<string, string>();
 /** Maps Eta template basename (no extension) -> statically inferred Eta config. */
 export const templateLanguageOptionsMap = new Map<string, EtaLanguageOptions>();
 
+export interface EtaDataDefinition {
+  fileName: string;
+  start: number;
+  length: number;
+}
+
+/** Maps template basename -> data path -> source declarations. */
+export const templateDataDefinitionMap = new Map<
+  string,
+  Map<string, EtaDataDefinition[]>
+>();
+
 /** Scan the workspace root for TS/JS source files (excludes node_modules etc.). */
 export function scanWorkspaceFiles(root: string): void {
   try {
@@ -372,6 +384,169 @@ function mergeTemplateType(key: string, typeStr: string): void {
   );
 }
 
+function dataPathKey(dataPath: string[]): string {
+  return JSON.stringify(dataPath);
+}
+
+function definitionNodeForSymbol(symbol: ts.Symbol): ts.Node | undefined {
+  const declaration = symbol.valueDeclaration ?? symbol.declarations?.[0];
+  if (!declaration) return undefined;
+
+  const name = (declaration as ts.NamedDeclaration).name;
+  return name && !ts.isComputedPropertyName(name) ? name : declaration;
+}
+
+function addTemplateDataDefinition(
+  templateKey: string,
+  dataPath: string[],
+  node: ts.Node,
+): void {
+  const sourceFile = node.getSourceFile();
+  const definition: EtaDataDefinition = {
+    fileName: sourceFile.fileName,
+    start: node.getStart(sourceFile),
+    length: node.getWidth(sourceFile),
+  };
+  let definitionsByPath = templateDataDefinitionMap.get(templateKey);
+  if (!definitionsByPath) {
+    definitionsByPath = new Map();
+    templateDataDefinitionMap.set(templateKey, definitionsByPath);
+  }
+
+  const key = dataPathKey(dataPath);
+  const definitions = definitionsByPath.get(key) ?? [];
+  if (
+    !definitions.some(
+      (existing) =>
+        existing.fileName === definition.fileName &&
+        existing.start === definition.start &&
+        existing.length === definition.length,
+    )
+  ) {
+    definitions.push(definition);
+    definitionsByPath.set(key, definitions);
+  }
+}
+
+function collectTypeDataDefinitions(
+  templateKey: string,
+  checker: ts.TypeChecker,
+  type: ts.Type,
+  dataPath: string[],
+  fallbackNode: ts.Node,
+  depth = 0,
+): void {
+  if (depth > MAX_TYPE_DEPTH) return;
+
+  if (type.isUnionOrIntersection()) {
+    for (const member of type.types) {
+      collectTypeDataDefinitions(
+        templateKey,
+        checker,
+        member,
+        dataPath,
+        fallbackNode,
+        depth + 1,
+      );
+    }
+    return;
+  }
+
+  if (checker.isArrayType(type) || checker.isTupleType(type)) {
+    for (const elementType of checker.getTypeArguments(
+      type as ts.TypeReference,
+    )) {
+      collectTypeDataDefinitions(
+        templateKey,
+        checker,
+        elementType,
+        dataPath,
+        fallbackNode,
+        depth + 1,
+      );
+    }
+    return;
+  }
+
+  if (
+    primitiveFromFlags(type.flags) !== undefined ||
+    literalTypeToString(type) !== undefined ||
+    type.getCallSignatures().length > 0 ||
+    type.getConstructSignatures().length > 0
+  ) {
+    return;
+  }
+
+  for (const property of checker.getPropertiesOfType(type)) {
+    const propertyPath = [...dataPath, property.name];
+    const definitionNode = definitionNodeForSymbol(property);
+    if (definitionNode) {
+      addTemplateDataDefinition(templateKey, propertyPath, definitionNode);
+    }
+
+    try {
+      const propertyType = checker.getTypeOfSymbolAtLocation(
+        property,
+        definitionNode ?? fallbackNode,
+      );
+      collectTypeDataDefinitions(
+        templateKey,
+        checker,
+        propertyType,
+        propertyPath,
+        definitionNode ?? fallbackNode,
+        depth + 1,
+      );
+    } catch {
+      // Some synthetic symbols do not expose a resolvable source type.
+    }
+  }
+}
+
+function expressionDefinitionNode(
+  expression: ts.Expression,
+  checker: ts.TypeChecker,
+): ts.Node {
+  const symbolNode = ts.isPropertyAccessExpression(expression)
+    ? expression.name
+    : ts.isElementAccessExpression(expression) && expression.argumentExpression
+      ? expression.argumentExpression
+      : expression;
+  const symbol = checker.getSymbolAtLocation(symbolNode);
+  return (symbol && definitionNodeForSymbol(symbol)) ?? expression;
+}
+
+function mergeTemplateDataDefinitions(
+  targetKey: string,
+  sourceKey: string,
+): void {
+  const source = templateDataDefinitionMap.get(sourceKey);
+  if (!source) return;
+
+  let target = templateDataDefinitionMap.get(targetKey);
+  if (!target) {
+    target = new Map();
+    templateDataDefinitionMap.set(targetKey, target);
+  }
+
+  for (const [key, definitions] of source) {
+    const targetDefinitions = target.get(key) ?? [];
+    for (const definition of definitions) {
+      if (
+        !targetDefinitions.some(
+          (existing) =>
+            existing.fileName === definition.fileName &&
+            existing.start === definition.start &&
+            existing.length === definition.length,
+        )
+      ) {
+        targetDefinitions.push(definition);
+      }
+    }
+    target.set(key, targetDefinitions);
+  }
+}
+
 function recordRenderCallType(
   templateName: string,
   dataArg: ts.Expression,
@@ -387,6 +562,12 @@ function recordRenderCallType(
     const typeStr = typeToStructuralString(checker, type);
     if (typeStr === "any" || typeStr === "unknown") return;
     mergeTemplateType(basename, typeStr);
+    addTemplateDataDefinition(
+      basename,
+      [],
+      expressionDefinitionNode(dataArg, checker),
+    );
+    collectTypeDataDefinitions(basename, checker, type, [], dataArg);
   } catch {
     // type extraction failed for this call; skip
   }
@@ -436,6 +617,7 @@ export function analyzeEtaTemplateLayouts(etaFiles: string[]): void {
       const layoutKey = templateKeyFromPath(layoutName);
       if (layoutKey === childKey) continue;
       mergeTemplateType(layoutKey, withLayoutBody(childType));
+      mergeTemplateDataDefinitions(layoutKey, childKey);
       if (!templateLanguageOptionsMap.has(layoutKey)) {
         templateLanguageOptionsMap.set(layoutKey, options);
       }
@@ -535,6 +717,22 @@ export function getItTypeForUri(uri: string): string {
     return templateDataTypeMap.get(basename) ?? DEFAULT_IT_TYPE;
   } catch {
     return DEFAULT_IT_TYPE;
+  }
+}
+
+/** Return source declarations for an inferred data path in this template. */
+export function getDataDefinitionsForUri(
+  uri: string,
+  dataPath: string[],
+): EtaDataDefinition[] {
+  try {
+    const fsPath = fileURLToPath(uri);
+    const basename = path.basename(fsPath, path.extname(fsPath));
+    return (
+      templateDataDefinitionMap.get(basename)?.get(dataPathKey(dataPath)) ?? []
+    );
+  } catch {
+    return [];
   }
 }
 

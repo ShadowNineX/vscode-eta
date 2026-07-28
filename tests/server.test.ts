@@ -85,6 +85,27 @@ describe("server entrypoint", () => {
     expect(mocks.documents.onDidOpen).toHaveBeenCalledTimes(1);
     expect(mocks.documents.onDidChangeContent).toHaveBeenCalledTimes(1);
     expect(mocks.documents.listen).toHaveBeenCalledTimes(1);
+    const completion = mocks.connection.onCompletion.mock.calls[0][0];
+    const hover = mocks.connection.onHover.mock.calls[0][0];
+    const missingDocumentParams = {
+      textDocument: { uri: "file:///missing.eta" },
+      position: { line: 0, character: 0 },
+    };
+    expect(completion(missingDocumentParams)).toEqual([]);
+    expect(hover(missingDocumentParams)).toBeNull();
+
+    const plainDocument = {
+      uri: "file:///plain.eta",
+      getText: () => "No Eta tag here",
+    };
+    mocks.documents.get.mockReturnValue(plainDocument);
+    expect(
+      completion({
+        textDocument: { uri: plainDocument.uri },
+        position: { line: 0, character: 3 },
+      }),
+    ).toEqual([]);
+
     const source = "<% const value = 1; %>\n<%= value %>";
     const document = {
       uri: pathToFileURL(path.join(os.tmpdir(), "template.eta")).toString(),

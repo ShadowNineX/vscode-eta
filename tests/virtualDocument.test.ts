@@ -5,6 +5,7 @@ import {
   PREAMBLE_LINE_COUNT,
   buildPreamble,
   buildVirtualContent,
+  buildVirtualDocument,
   buildVirtualLine,
 } from "../src/virtualDocument";
 import { positionToOffset } from "../src/position";
@@ -29,7 +30,7 @@ function createVirtualLanguageService(
         ? undefined
         : ts.ScriptSnapshot.fromString(content);
     },
-    getCurrentDirectory: () => process.cwd(),
+    getCurrentDirectory: ts.sys.getCurrentDirectory,
     getCompilationSettings: () => ({
       target: ts.ScriptTarget.ES2020,
       module: ts.ModuleKind.ESNext,
@@ -74,7 +75,7 @@ describe("buildVirtualLine", () => {
   it("replaces HTML-only text with spaces", () => {
     const line = "Hello World";
     expect(buildVirtualLine(line)).toBe("           ");
-    expect(buildVirtualLine(line).length).toBe(line.length);
+    expect(buildVirtualLine(line)).toHaveLength(line.length);
   });
 
   it("preserves JS inside <%= %> at the correct character positions", () => {
@@ -85,7 +86,7 @@ describe("buildVirtualLine", () => {
     expect(vl[11]).toBe("t");
     expect(vl[12]).toBe(".");
     expect(vl[13]).toBe("n");
-    expect(vl.length).toBe(line.length);
+    expect(vl).toHaveLength(line.length);
   });
 
   it("preserves JS inside <% %> at the correct positions", () => {
@@ -93,21 +94,32 @@ describe("buildVirtualLine", () => {
     const vl = buildVirtualLine(line);
     // "const" starts at position 3 in original
     expect(vl.substring(3, 12)).toBe("const x =");
-    expect(vl.length).toBe(line.length);
+    expect(vl).toHaveLength(line.length);
   });
 
-  it("handles <%~ tag (raw output)", () => {
-    const line = "<%~ it.html %>";
-    const vl = buildVirtualLine(line);
-    expect(vl[4]).toBe("i"); // 'i' of 'it'
-    expect(vl.length).toBe(line.length);
-  });
-
-  it("handles <%- (newline trim) tag", () => {
-    const line = "<%- code %>";
-    const vl = buildVirtualLine(line);
-    expect(vl[4]).toBe("c");
-    expect(vl.length).toBe(line.length);
+  it.each([
+    {
+      name: "<%~ raw-output opener",
+      line: "<%~ it.html %>",
+      index: 4,
+      expected: "i",
+    },
+    {
+      name: "<%- newline-trim opener",
+      line: "<%- code %>",
+      index: 4,
+      expected: "c",
+    },
+    {
+      name: "_%> trim closer",
+      line: "<% code _%>",
+      index: 3,
+      expected: "c",
+    },
+  ])("handles $name", ({ line, index, expected }) => {
+    const virtualLine = buildVirtualLine(line);
+    expect(virtualLine[index]).toBe(expected);
+    expect(virtualLine).toHaveLength(line.length);
   });
 
   it("handles <%_= (whitespace trim + output) combo", () => {
@@ -115,7 +127,7 @@ describe("buildVirtualLine", () => {
     const vl = buildVirtualLine(line);
     expect(vl[4]).toBe(" ");
     expect(vl[5]).toBe("i");
-    expect(vl.length).toBe(line.length);
+    expect(vl).toHaveLength(line.length);
   });
 
   it("handles whitespace before an output prefix", () => {
@@ -123,22 +135,16 @@ describe("buildVirtualLine", () => {
     const vl = buildVirtualLine(line);
     expect(vl[5]).toBe("i");
     expect(vl.substring(5, 12)).toBe("it.name");
-    expect(vl.length).toBe(line.length);
+    expect(vl).toHaveLength(line.length);
   });
 
   it("does not treat a JavaScript block comment as a custom prefix", () => {
     const line = "<% /* comment */ %>";
     const vl = buildVirtualLine(line);
     expect(vl.substring(3, 16)).toBe("/* comment */");
-    expect(vl.length).toBe(line.length);
+    expect(vl).toHaveLength(line.length);
   });
 
-  it("handles _%> trim closer", () => {
-    const line = "<% code _%>";
-    const vl = buildVirtualLine(line);
-    expect(vl[3]).toBe("c");
-    expect(vl.length).toBe(line.length);
-  });
 
   it("handles multiple tags on one line", () => {
     const line = "<% if (cond) { %> text <% } %>";
@@ -146,7 +152,7 @@ describe("buildVirtualLine", () => {
     // "if (cond)" starts at position 3 in original
     expect(vl[3]).toBe("i");
     expect(vl[4]).toBe("f");
-    expect(vl.length).toBe(line.length);
+    expect(vl).toHaveLength(line.length);
   });
 
   it("separates multiple output tags on one line", () => {
@@ -156,7 +162,7 @@ describe("buildVirtualLine", () => {
     expect(vl).toContain("it.featuredImage");
     expect(vl).toContain("it.title");
     expect(vl).toMatch(/it\.featuredImage\s*;/);
-    expect(vl.length).toBe(line.length);
+    expect(vl).toHaveLength(line.length);
   });
 
   it("handles empty string", () => {
@@ -249,7 +255,7 @@ describe("buildVirtualContent", () => {
     const vc = buildVirtualContent(source, "{ name: string }", options);
     const lines = vc.split("\n");
 
-    expect(lines[0]).toBe("declare const data: { name: string }; declare const it: { name: string };");
+    expect(lines[0]).toBe("declare const data: { name: string };");
     expect(lines[PREAMBLE_LINE_COUNT]).toContain("data.name");
   });
 
@@ -304,7 +310,7 @@ describe("buildPreamble", () => {
 
   it("always produces exactly 9 newlines (PREAMBLE_LINE_COUNT)", () => {
     const p = buildPreamble("{ x: number }");
-    expect((p.match(/\n/g) ?? []).length).toBe(PREAMBLE_LINE_COUNT);
+    expect(p.match(/\n/g) ?? []).toHaveLength(PREAMBLE_LINE_COUNT);
   });
 
   it("collapses multi-line it type to a single line", () => {
@@ -320,7 +326,7 @@ describe("buildPreamble", () => {
     expect(p).toContain("declare const it: Record<string, any>;");
   });
 
-  it("uses a custom varName and keeps an it alias for compatibility", () => {
+  it("uses only the configured custom varName", () => {
     const p = buildPreamble("{ name: string }", {
       tags: ["<%", "%>"],
       parse: { exec: "", interpolate: "=", raw: "~" },
@@ -331,8 +337,9 @@ describe("buildPreamble", () => {
     });
 
     expect(p.split("\n")[0]).toBe(
-      "declare const data: { name: string }; declare const it: { name: string };",
+      "declare const data: { name: string };",
     );
+    expect(p).not.toContain("declare const it:");
   });
 
   it("declares top-level fields for useWith", () => {
@@ -353,17 +360,24 @@ describe("buildPreamble", () => {
     );
   });
 
-  it("injects functionHeader on the first preamble line", () => {
-    const p = buildPreamble("{ user: { name: string } }", {
-      tags: ["<%", "%>"],
+  it("preserves multiline functionHeader JavaScript and reports its line offset", () => {
+    const options = {
+      tags: ["<%", "%>"] as [string, string],
       parse: { exec: "", interpolate: "=", raw: "~" },
       customTags: [],
       varName: "it",
       useWith: false,
-      functionHeader: "const userName = it.user.name",
-    });
+      functionHeader: "// helper comment\nconst helper = () => 1;",
+    };
+    const virtual = buildVirtualDocument("<%= helper() %>", "{ value: number }", options);
 
-    expect(p.split("\n")[0]).toContain("const userName = it.user.name");
+    expect(virtual.content).toContain(
+      "// helper comment\nconst helper = () => 1;\ndeclare const it:",
+    );
+    expect(virtual.preambleLineCount).toBe(PREAMBLE_LINE_COUNT + 2);
+    expect(virtual.content.split("\n")[virtual.preambleLineCount]).toContain(
+      "helper()",
+    );
   });
 
   it("uses a custom outputFunctionName in Eta builtin declarations", () => {
@@ -387,6 +401,7 @@ describe("buildPreamble", () => {
       "include",
       "includeAsync",
       "layout",
+
       "block",
       "blockAsync",
       "output",
@@ -395,6 +410,11 @@ describe("buildPreamble", () => {
     ]) {
       expect(p).toContain(`declare function ${name}`);
     }
+  });
+
+  it("allows Eta output helpers to coerce arbitrary values", () => {
+    const p = buildPreamble(DEFAULT_IT_TYPE);
+    expect(p).toContain("declare function output(content: unknown): void;");
   });
 });
 

@@ -33,6 +33,8 @@ export function isInsideEtaTagInText(
 ): boolean {
   const offset = positionToOffset(text, line, character);
   return findEtaTagRanges(text, options).some(
-    (range) => offset >= range.contentStart && offset < range.end,
+    (range) =>
+      offset >= range.contentStart &&
+      (offset < range.end || (!range.closed && offset === range.end)),
   );
 }

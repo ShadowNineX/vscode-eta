@@ -176,23 +176,13 @@ describe("countTags - broken templates have mismatched counts", () => {
 // ── Line-level diagnostics - tested against specific fixture lines ────────────
 
 describe("diagnoseLine - well-formed lines produce no issues", () => {
-  it("simple.eta line 0 has no issues", () => {
-    const line = readTemplate("simple.eta").split("\n")[0];
-    expect(diagnoseLine(line)).toHaveLength(0);
-  });
-
-  it("conditional.eta line 0 has no issues", () => {
-    const line = readTemplate("conditional.eta").split("\n")[0];
-    expect(diagnoseLine(line)).toHaveLength(0);
-  });
-
-  it("page.eta line 0 (include line) has no issues", () => {
-    const line = readTemplate("page.eta").split("\n")[0];
-    expect(diagnoseLine(line)).toHaveLength(0);
-  });
-
-  it("child.eta line 0 (layout line) has no issues", () => {
-    const line = readTemplate("child.eta").split("\n")[0];
+  it.each([
+    { name: "simple.eta line 0", fileName: "simple.eta" },
+    { name: "conditional.eta line 0", fileName: "conditional.eta" },
+    { name: "page.eta line 0 (include line)", fileName: "page.eta" },
+    { name: "child.eta line 0 (layout line)", fileName: "child.eta" },
+  ])("$name has no issues", ({ fileName }) => {
+    const line = readTemplate(fileName).split("\n")[0];
     expect(diagnoseLine(line)).toHaveLength(0);
   });
 });

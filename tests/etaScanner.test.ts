@@ -14,42 +14,32 @@ describe("consumeTagOpener", () => {
     expect(r.next).toBe(2);
   });
 
-  it("handles <%= (output escaped)", () => {
-    const r = consumeTagOpener("<%= it.x %>", 0);
-    expect(r.padLen).toBe(3);
-    expect(r.next).toBe(3);
-  });
+  const customTagOptions = {
+    tags: ["<%", "%>"],
+    parse: { exec: "", interpolate: "=", raw: "~" },
+    customTags: ["#", "*"],
+    varName: "it",
+    useWith: false,
+    functionHeader: "",
+  } satisfies Parameters<typeof consumeTagOpener>[2];
 
-  it("handles <%~ (output raw)", () => {
-    const r = consumeTagOpener("<%~ it.x %>", 0);
-    expect(r.padLen).toBe(3);
-    expect(r.next).toBe(3);
-  });
-
-  it("handles <%# (custom comment)", () => {
-    const r = consumeTagOpener("<%# comment %>", 0, {
-      tags: ["<%", "%>"],
-      parse: { exec: "", interpolate: "=", raw: "~" },
-      customTags: ["#"],
-      varName: "it",
-      useWith: false,
-      functionHeader: "",
-    });
-    expect(r.padLen).toBe(3);
-    expect(r.next).toBe(3);
-  });
-
-  it("handles <%* (custom tag)", () => {
-    const r = consumeTagOpener("<%* key %>", 0, {
-      tags: ["<%", "%>"],
-      parse: { exec: "", interpolate: "=", raw: "~" },
-      customTags: ["*"],
-      varName: "it",
-      useWith: false,
-      functionHeader: "",
-    });
-    expect(r.padLen).toBe(3);
-    expect(r.next).toBe(3);
+  it.each([
+    { name: "<%= (output escaped)", source: "<%= it.x %>", options: undefined },
+    { name: "<%~ (output raw)", source: "<%~ it.x %>", options: undefined },
+    {
+      name: "<%# (custom comment)",
+      source: "<%# comment %>",
+      options: customTagOptions,
+    },
+    {
+      name: "<%* (custom tag)",
+      source: "<%* key %>",
+      options: customTagOptions,
+    },
+  ])("handles $name", ({ source, options }) => {
+    const result = consumeTagOpener(source, 0, options);
+    expect(result.padLen).toBe(3);
+    expect(result.next).toBe(3);
   });
 
   it("works at a non-zero start offset", () => {
@@ -162,6 +152,12 @@ describe("consumeTagContent", () => {
     expect(next).toBe(17);
   });
 
+  it("closes at a delimiter after // because Eta does not lex line comments", () => {
+    const { js, next } = consumeTagContent("// comment %>\nignored", 0);
+    expect(js).toBe("// comment   ");
+    expect(next).toBe(13);
+  });
+
   it("reads until a custom closing delimiter", () => {
     const { js, next } = consumeTagContent(" data.name }}", 0, {
       tags: ["{{", "}}"],
@@ -188,6 +184,15 @@ describe("findEtaTagRanges", () => {
     const ranges = findEtaTagRanges("<%= it.name");
     expect(ranges).toHaveLength(1);
     expect(ranges[0].closed).toBe(false);
+  });
+
+  it("classifies unclosed strings and block comments", () => {
+    expect(findEtaTagRanges('<%= "unterminated')[0].unclosedState).toBe(
+      "string",
+    );
+    expect(findEtaTagRanges("<% /* unterminated")[0].unclosedState).toBe(
+      "block-comment",
+    );
   });
 
   it("marks empty tags", () => {

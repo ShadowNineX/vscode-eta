@@ -99,14 +99,22 @@ const ETA_BUILTINS: { [key: string]: any } = {
 
 function getEtaBuiltins(options: EtaLanguageOptions): { [key: string]: any } {
   const outputFunctionName = options.outputFunctionName ?? "output";
-  if (outputFunctionName === "output") return ETA_BUILTINS;
   const builtins = { ...ETA_BUILTINS };
-  delete builtins.output;
-  builtins[outputFunctionName] = {
-    ...ETA_BUILTINS.output,
-    label: outputFunctionName,
-    insertText: `${outputFunctionName}("\${1:content}")$0`,
-  };
+  if (outputFunctionName !== "output") {
+    delete builtins.output;
+    builtins[outputFunctionName] = {
+      ...ETA_BUILTINS.output,
+      label: outputFunctionName,
+      insertText: `${outputFunctionName}("\${1:content}")$0`,
+    };
+  }
+  if (options.varName !== "it") {
+    delete builtins.it;
+    builtins[options.varName] = {
+      ...ETA_BUILTINS.it,
+      label: options.varName,
+    };
+  }
   return builtins;
 }
 
@@ -222,14 +230,6 @@ class EtaCompletionProvider implements vscode.CompletionItemProvider {
           completion.insertText = new vscode.SnippetString(item.insertText);
         }
         completions.push(completion);
-      }
-      if (options.varName !== "it") {
-        const item = new vscode.CompletionItem(
-          options.varName,
-          vscode.CompletionItemKind.Variable,
-        );
-        item.detail = "Template data object";
-        completions.push(item);
       }
 
       // Add common JavaScript methods/functions
@@ -393,53 +393,6 @@ class EtaHoverProvider implements vscode.HoverProvider {
   }
 }
 
-class EtaDiagnosticsProvider {
-  private readonly diagnosticCollection: vscode.DiagnosticCollection;
-  constructor() {
-    this.diagnosticCollection =
-      vscode.languages.createDiagnosticCollection("eta");
-  }
-
-  provideDiagnostics(document: vscode.TextDocument): void {
-    const diagnostics: vscode.Diagnostic[] = [];
-    const text = document.getText();
-    const ranges = findEtaTagRanges(text, getEtaLanguageOptions());
-
-    for (const tag of ranges) {
-      const start = document.positionAt(tag.start);
-      const end = document.positionAt(tag.end);
-      if (!tag.closed) {
-        const diagnostic = new vscode.Diagnostic(
-          new vscode.Range(start, end),
-          "Unclosed Eta tag",
-          vscode.DiagnosticSeverity.Error,
-        );
-        diagnostic.source = "Eta Linter";
-        diagnostics.push(diagnostic);
-      } else if (tag.empty) {
-        const diagnostic = new vscode.Diagnostic(
-          new vscode.Range(start, end),
-          "Empty Eta tag",
-          vscode.DiagnosticSeverity.Information,
-        );
-        diagnostic.source = "Eta Linter";
-        diagnostics.push(diagnostic);
-      }
-    }
-
-    this.diagnosticCollection.set(document.uri, diagnostics);
-    if (diagnostics.length > 0) {
-      logger?.warn(
-        `${path.basename(document.fileName)}: ${diagnostics.length} diagnostic(s) - ` +
-          diagnostics.map((d) => d.message).join(" | "),
-      );
-    }
-  }
-
-  dispose(): void {
-    this.diagnosticCollection.dispose();
-  }
-}
 
 export function activate(context: vscode.ExtensionContext): void {
   log = vscode.window.createOutputChannel("Eta", { log: true });
@@ -450,7 +403,6 @@ export function activate(context: vscode.ExtensionContext): void {
   // Register completion provider
   const completionProvider = new EtaCompletionProvider();
   const hoverProvider = new EtaHoverProvider();
-  const diagnosticsProvider = new EtaDiagnosticsProvider();
 
   context.subscriptions.push(
     vscode.languages.registerCompletionItemProvider(
@@ -462,31 +414,8 @@ export function activate(context: vscode.ExtensionContext): void {
       " ",
     ),
     vscode.languages.registerHoverProvider("eta", hoverProvider),
-    diagnosticsProvider,
-    vscode.workspace.onDidOpenTextDocument((document: vscode.TextDocument) => {
-      if (document.languageId === "eta") {
-        logger.debug(`Opened ${document.fileName}`);
-        diagnosticsProvider.provideDiagnostics(document);
-      }
-    }),
-    vscode.workspace.onDidChangeTextDocument(
-      (event: vscode.TextDocumentChangeEvent) => {
-        if (event.document.languageId === "eta") {
-          diagnosticsProvider.provideDiagnostics(event.document);
-        }
-      },
-    ),
   );
 
-  // Provide diagnostics for currently open documents
-  for (const editor of vscode.window.visibleTextEditors) {
-    if (editor.document.languageId === "eta") {
-      logger.debug(
-        `Providing initial diagnostics for ${editor.document.fileName}`,
-      );
-      diagnosticsProvider.provideDiagnostics(editor.document);
-    }
-  }
 
   // ── Language Server (JS/TS IntelliSense inside Eta tags) ─────────────────
   const serverModule = context.asAbsolutePath(path.join("out", "server.js"));
@@ -501,10 +430,13 @@ export function activate(context: vscode.ExtensionContext): void {
     },
     synchronize: {
       configurationSection: "eta",
-      // Forward TS/JS file changes to the server so it can re-infer `it` types
-      fileEvents: vscode.workspace.createFileSystemWatcher(
-        "**/*.{ts,tsx,js,jsx,eta}",
-      ),
+      // Re-infer data and reload project settings when source/config changes.
+      fileEvents: [
+        vscode.workspace.createFileSystemWatcher("**/*.{ts,tsx,js,jsx,eta}"),
+        vscode.workspace.createFileSystemWatcher(
+          "**/{tsconfig.json,jsconfig.json}",
+        ),
+      ],
     },
   };
   client = new LanguageClient(

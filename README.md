@@ -21,12 +21,12 @@
 
 - 🎨 Syntax highlighting for Eta tags, embedded JavaScript, HTML, strings, and comments.
 - 🧩 Snippets for common Eta patterns.
-- 🧠 TypeScript language features inside Eta tags.
-- 🔍 Hover documentation for Eta helpers and tags.
-- ✅ Diagnostics for unclosed and empty Eta tags.
-- ⚡ Completions for `layout`, `include`, `includeAsync`, `block`, `blockAsync`, `output`, `capture`, and `captureAsync`.
-- 🧬 `it` type inference from Eta render calls in nearby TypeScript and JavaScript files.
-- 🛠 Support for configurable Eta delimiters, parse prefixes, `customTags`, `varName`, `useWith`, `functionHeader`, and `outputFunctionName`.
+- 🧠 TypeScript completions, hovers, signature help, references, and rename inside Eta tags.
+- 🔍 Go to Definition for local/inferred data, include/layout paths, and named blocks.
+- ✅ Mapped TypeScript diagnostics plus precise empty, unclosed-tag, string, and block-comment diagnostics.
+- ⚡ Eta-helper and template-path completions for includes and layouts.
+- 🧬 Collision-safe template data inference from render calls, includes, and layouts.
+- 🛠 Workspace `tsconfig.json`/`jsconfig.json`, multiple roots, and configurable Eta delimiters, parse prefixes, `customTags`, `varName`, `useWith`, `functionHeader`, and `outputFunctionName`.
 
 ## 🚀 Quick Taste
 
@@ -81,8 +81,9 @@ Supported inference sources:
 
 - Eta v3/v4 named template calls: `render(...)` and `renderAsync(...)`.
 - Legacy Eta v2 file calls: `renderFile(...)` and `renderFileAsync(...)`.
+- String literals and no-substitution template literals on recognized Eta instances, including `withConfig(...)`.
 - Programmatic templates named with `@`, such as `eta.render("@header", data)`.
-- Layout propagation through `layout("./base")`, including layout `body` content.
+- Inherited and explicit data passed through `include(...)` and `layout(...)`, including layout `body` content.
 
 `renderString(...)` and `renderStringAsync(...)` are treated as inline Eta source, so they are not mapped to `.eta` template files.
 

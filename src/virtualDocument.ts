@@ -11,31 +11,30 @@ import {
 
 export const DEFAULT_IT_TYPE = "Record<string, any>";
 
-/** Eta built-in function declarations (8 lines, each ending with \n). */
+/** Eta built-in function declarations (8 lines). */
 function buildEtaBuiltins(options: EtaLanguageOptions): string {
   const outputFunctionName = options.outputFunctionName || "output";
   return [
-  `declare function include(path: string, data?: Record<string, any>): string;`,
-  `declare function includeAsync(path: string, data?: Record<string, any>): Promise<string>;`,
-  `declare function layout(path: string, data?: Record<string, any>): void;`,
-  `declare function block(name: string, fn?: () => void): string;`,
-  `declare function blockAsync(name: string, fn?: () => Promise<void>): Promise<string>;`,
-    `declare function ${outputFunctionName}(content: string): void;`,
-  `declare function capture(fn: () => void): string;`,
-  `declare function captureAsync(fn: () => Promise<void>): Promise<string>;`,
+    `declare function include(path: string, data?: Record<string, unknown>): string;`,
+    `declare function includeAsync(path: string, data?: Record<string, unknown>): Promise<string>;`,
+    `declare function layout(path: string, data?: Record<string, unknown>): void;`,
+    `declare function block(name: string, fn?: () => void): string;`,
+    `declare function blockAsync(name: string, fn?: () => Promise<void>): Promise<string>;`,
+    `declare function ${outputFunctionName}(content: unknown): void;`,
+    `declare function capture(fn: () => void): string;`,
+    `declare function captureAsync(fn: () => Promise<void>): Promise<string>;`,
   ].join("\n");
 }
 
-/**
- * Build the 9-line preamble injected at the top of every virtual TS file.
- * The `it` declaration is always a single line so PREAMBLE_LINE_COUNT is fixed.
- */
+/** Collapse only generated type text; user-provided JavaScript stays raw. */
 function singleLine(value: string): string {
   return value.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
 }
 
 function getTopLevelPropertyNames(type: string): string[] {
-  const body = type.trim().replace(/^\{\s*/, "").replace(/\s*\}$/, "");
+  let body = type.trim();
+  if (body.startsWith("{")) body = body.slice(1).trimStart();
+  if (body.endsWith("}")) body = body.slice(0, -1).trimEnd();
   const names = new Set<string>();
   let depth = 0;
   let current = "";
@@ -65,9 +64,6 @@ function buildDataDeclaration(
   const safeType = singleLine(itType);
   const declarations = [`declare const ${options.varName}: ${safeType};`];
 
-  if (options.varName !== "it") {
-    declarations.push(`declare const it: ${safeType};`);
-  }
 
   if (options.useWith) {
     for (const prop of getTopLevelPropertyNames(safeType)) {
@@ -77,8 +73,6 @@ function buildDataDeclaration(
     }
   }
 
-  const header = singleLine(options.functionHeader);
-  if (header.length > 0) declarations.push(header);
 
   return declarations.join(" ");
 }
@@ -87,30 +81,50 @@ export function buildPreamble(
   itType: string,
   options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
 ): string {
-  const safe = itType.replace(/\r?\n/g, " ").replace(/\s+/g, " ").trim();
-  return `${buildDataDeclaration(safe, options)}\n${buildEtaBuiltins(options)}\n`;
+  const normalizedHeader = options.functionHeader.replaceAll("\r\n", "\n");
+  let header = "";
+  if (normalizedHeader) {
+    header = normalizedHeader.endsWith("\n")
+      ? normalizedHeader
+      : `${normalizedHeader}\n`;
+  }
+  return `${header}${buildDataDeclaration(itType, options)}\n${buildEtaBuiltins(options)}\n`;
 }
 
-/** Always 9 lines: 1 (`it`) + 8 (built-ins). Verified by test. */
+/** Default preamble size retained for consumers using default Eta options. */
 export const PREAMBLE_LINE_COUNT = 9;
 
+export interface VirtualDocument {
+  content: string;
+  preambleLineCount: number;
+}
+
+export function buildVirtualDocument(
+  etaSource: string,
+  itType: string = DEFAULT_IT_TYPE,
+  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
+): VirtualDocument {
+  const preamble = buildPreamble(itType, options);
+  return {
+    content:
+      preamble +
+      buildVirtualContentBody(etaSource, options) +
+      "\nexport {};",
+    preambleLineCount: preamble.split("\n").length - 1,
+  };
+}
+
 /**
- * Build a virtual TypeScript file from Eta source.
- * Prepends a 9-line preamble (with the correct `it` type), then replaces
- * non-tag characters with spaces so offsets inside tags are preserved.
+ * Build a virtual TypeScript file from Eta source. Generated preamble lines
+ * precede a length-preserving template body; raw functionHeader lines make the
+ * body offset dynamic.
  */
 export function buildVirtualContent(
   etaSource: string,
   itType: string = DEFAULT_IT_TYPE,
   options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
 ): string {
-  return (
-    buildPreamble(itType, options) +
-    buildVirtualContentBody(etaSource, options) +
-    // Append a module marker so TypeScript treats this as a module (not a
-    // global script). Without it every virtual file shares global scope.
-    "\nexport {};"
-  );
+  return buildVirtualDocument(etaSource, itType, options).content;
 }
 
 export function buildVirtualLine(

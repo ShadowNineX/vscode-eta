@@ -7,17 +7,36 @@ import {
   EtaLanguageOptions,
   normalizeEtaLanguageOptions,
 } from "./etaConfig";
-import { findEtaTagRanges } from "./etaScanner";
-import { DEFAULT_IT_TYPE } from "./virtualDocument";
+import { buildVirtualDocument, DEFAULT_IT_TYPE } from "./virtualDocument";
+import {
+  canonicalTemplatePath,
+  resolveTemplatePath,
+} from "./templatePaths";
 
 /** Absolute fs paths of every .ts/.js file found in the workspace. */
 export const workspaceTsFiles = new Set<string>();
 /** Absolute fs paths of every .eta file found in the workspace. */
 export const workspaceEtaFiles = new Set<string>();
-/** Maps Eta template basename (no extension) -> inferred `it` type string. */
+export interface WorkspaceProject {
+  root: string;
+  rootNames: string[];
+  options: ts.CompilerOptions;
+}
+
+export const workspaceProjects: WorkspaceProject[] = [];
+/** Maps a canonical template path (or unresolved test key) to inferred data. */
 export const templateDataTypeMap = new Map<string, string>();
-/** Maps Eta template basename (no extension) -> statically inferred Eta config. */
+/** Maps the same template identity to its statically inferred Eta config. */
 export const templateLanguageOptionsMap = new Map<string, EtaLanguageOptions>();
+export interface EtaTemplateResolutionOptions {
+  views?: string;
+  defaultExtension: string;
+}
+
+export const templateResolutionOptionsMap = new Map<
+  string,
+  EtaTemplateResolutionOptions
+>();
 
 export interface EtaDataDefinition {
   fileName: string;
@@ -30,8 +49,48 @@ export const templateDataDefinitionMap = new Map<
   string,
   Map<string, EtaDataDefinition[]>
 >();
+interface EtaInstanceConfig {
+  languageOptions: EtaLanguageOptions;
+  views?: string;
+  defaultExtension: string;
+}
 
-/** Scan the workspace root for TS/JS source files (excludes node_modules etc.). */
+const DEFAULT_COMPILER_OPTIONS: ts.CompilerOptions = {
+  allowJs: true,
+  checkJs: false,
+  target: ts.ScriptTarget.ES2020,
+  module: ts.ModuleKind.ESNext,
+  moduleResolution: ts.ModuleResolutionKind.Bundler,
+  noEmit: true,
+  skipLibCheck: true,
+};
+
+function readWorkspaceProject(root: string): WorkspaceProject | undefined {
+  const configFile = ts.findConfigFile(
+    root,
+    ts.sys.fileExists,
+    "tsconfig.json",
+  ) ??
+    ts.findConfigFile(root, ts.sys.fileExists, "jsconfig.json");
+  if (!configFile) return undefined;
+
+  const loaded = ts.readConfigFile(configFile, ts.sys.readFile);
+  if (loaded.error) return undefined;
+  const parsed = ts.parseJsonConfigFileContent(
+    loaded.config,
+    ts.sys,
+    path.dirname(configFile),
+    { noEmit: true },
+    configFile,
+  );
+  return {
+    root: path.dirname(configFile),
+    rootNames: parsed.fileNames,
+    options: { ...parsed.options, noEmit: true },
+  };
+}
+
+/** Scan one workspace root and load its TypeScript project configuration. */
 export function scanWorkspaceFiles(root: string): void {
   try {
     const sourceFiles = ts.sys.readDirectory(
@@ -39,23 +98,28 @@ export function scanWorkspaceFiles(root: string): void {
       [".ts", ".tsx", ".js", ".jsx"],
       ["node_modules", ".git", "out", "dist", "build"],
     );
-    for (const f of sourceFiles) {
-      // ts.sys.readDirectory only excludes top-level directory names; nested
-      // node_modules (e.g. demo/node_modules) still need this check.
-      if (f.includes("node_modules")) continue;
-      workspaceTsFiles.add(f);
+    for (const fileName of sourceFiles) {
+      if (!fileName.includes("node_modules")) workspaceTsFiles.add(fileName);
     }
     const etaFiles = ts.sys.readDirectory(
       root,
       [".eta"],
       ["node_modules", ".git", "out", "dist", "build"],
     );
-    for (const f of etaFiles) {
-      if (f.includes("node_modules")) continue;
-      workspaceEtaFiles.add(f);
+    for (const fileName of etaFiles) {
+      if (!fileName.includes("node_modules")) workspaceEtaFiles.add(fileName);
     }
+
+    const configured = readWorkspaceProject(root);
+    workspaceProjects.push(
+      configured ?? {
+        root,
+        rootNames: sourceFiles,
+        options: DEFAULT_COMPILER_OPTIONS,
+      },
+    );
   } catch {
-    // silently ignore; proceed without workspace context
+    // Proceed without workspace context when the root is unreadable.
   }
 }
 
@@ -221,7 +285,44 @@ function getObjectProperty(
 }
 
 function getStringLiteralValue(expr: ts.Expression): string | undefined {
-  return ts.isStringLiteral(expr) ? expr.text : undefined;
+  return ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)
+    ? expr.text
+    : undefined;
+}
+
+function getStaticPathValue(
+  expr: ts.Expression,
+  sourceFile: ts.SourceFile,
+): string | undefined {
+  const literal = getStringLiteralValue(expr);
+  if (literal !== undefined) {
+    return path.isAbsolute(literal)
+      ? path.normalize(literal)
+      : path.resolve(path.dirname(sourceFile.fileName), literal);
+  }
+  if (ts.isIdentifier(expr) && expr.text === "__dirname") {
+    return path.dirname(sourceFile.fileName);
+  }
+  if (
+    ts.isPropertyAccessExpression(expr) &&
+    expr.name.text === "dirname" &&
+    ts.isMetaProperty(expr.expression)
+  ) {
+    return path.dirname(sourceFile.fileName);
+  }
+  if (
+    ts.isCallExpression(expr) &&
+    ts.isPropertyAccessExpression(expr.expression) &&
+    (expr.expression.name.text === "join" ||
+      expr.expression.name.text === "resolve")
+  ) {
+    const parts = expr.arguments.map((argument) =>
+      getStaticPathValue(argument, sourceFile),
+    );
+    if (parts.includes(undefined)) return undefined;
+    return path.resolve(...(parts as string[]));
+  }
+  return undefined;
 }
 
 function getBooleanLiteralValue(expr: ts.Expression): boolean | undefined {
@@ -321,40 +422,124 @@ function getEtaConfigFromObjectLiteral(
   return config;
 }
 
-function getEtaConfigFromExpression(
+function getEtaInstanceConfigFromExpression(
   expr: ts.Expression | undefined,
-): EtaLanguageOptions {
-  if (!expr || !ts.isObjectLiteralExpression(expr)) {
-    return DEFAULT_ETA_LANGUAGE_OPTIONS;
-  }
-  return normalizeEtaLanguageOptions(getEtaConfigFromObjectLiteral(expr));
+  sourceFile: ts.SourceFile,
+): EtaInstanceConfig {
+  const object = expr && ts.isObjectLiteralExpression(expr) ? expr : undefined;
+  const viewsExpression = object
+    ? getObjectProperty(object, "views")
+    : undefined;
+  return {
+    languageOptions: object
+      ? normalizeEtaLanguageOptions(getEtaConfigFromObjectLiteral(object))
+      : DEFAULT_ETA_LANGUAGE_OPTIONS,
+    views: viewsExpression
+      ? getStaticPathValue(viewsExpression, sourceFile)
+      : undefined,
+    defaultExtension:
+      (object && getStringProperty(object, "defaultExtension")) || ".eta",
+  };
 }
 
-function isNewEtaExpression(expr: ts.Expression): expr is ts.NewExpression {
+function symbolComesFromEta(
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): boolean {
+  let symbol = checker.getSymbolAtLocation(node);
+  if (!symbol) return false;
+  if (symbol.flags & ts.SymbolFlags.Alias) {
+    symbol = checker.getAliasedSymbol(symbol);
+  }
+  return (symbol.declarations ?? []).some((declaration) => {
+    let current: ts.Node | undefined = declaration;
+    while (current && !ts.isImportDeclaration(current)) current = current.parent;
+    if (
+      current &&
+      ts.isStringLiteral(current.moduleSpecifier) &&
+      current.moduleSpecifier.text === "eta"
+    ) {
+      return true;
+    }
+    return declaration
+      .getSourceFile()
+      .fileName.replaceAll("\\", "/")
+      .includes("/node_modules/eta/");
+  });
+}
+
+function isNewEtaExpression(
+  expr: ts.Expression,
+  checker: ts.TypeChecker,
+): expr is ts.NewExpression {
+  if (!ts.isNewExpression(expr)) return false;
+  if (symbolComesFromEta(expr.expression, checker)) return true;
   return (
-    ts.isNewExpression(expr) &&
-    ((ts.isIdentifier(expr.expression) && expr.expression.text === "Eta") ||
-      (ts.isPropertyAccessExpression(expr.expression) &&
-        expr.expression.name.text === "Eta"))
+    (ts.isIdentifier(expr.expression) && expr.expression.text === "Eta") ||
+    (ts.isPropertyAccessExpression(expr.expression) &&
+      expr.expression.name.text === "Eta")
   );
+}
+
+function mergeInstanceConfig(
+  base: EtaInstanceConfig,
+  override: EtaInstanceConfig,
+): EtaInstanceConfig {
+  return {
+    languageOptions: applyNonDefaultEtaLanguageOptions(
+      base.languageOptions,
+      override.languageOptions,
+    ),
+    views: override.views ?? base.views,
+    defaultExtension:
+      override.defaultExtension !== ".eta"
+        ? override.defaultExtension
+        : base.defaultExtension,
+  };
 }
 
 function collectEtaInstanceConfigs(
   sourceFile: ts.SourceFile,
-): Map<string, EtaLanguageOptions> {
-  const configs = new Map<string, EtaLanguageOptions>();
+  checker: ts.TypeChecker,
+): Map<string, EtaInstanceConfig> {
+  const configs = new Map<string, EtaInstanceConfig>();
+
+  function configForExpression(
+    expression: ts.Expression,
+  ): EtaInstanceConfig | undefined {
+    if (ts.isIdentifier(expression)) return configs.get(expression.text);
+    if (isNewEtaExpression(expression, checker)) {
+      return getEtaInstanceConfigFromExpression(
+        expression.arguments?.[0],
+        sourceFile,
+      );
+    }
+    if (
+      ts.isCallExpression(expression) &&
+      ts.isPropertyAccessExpression(expression.expression) &&
+      expression.expression.name.text === "withConfig"
+    ) {
+      const base =
+        configForExpression(expression.expression.expression) ?? {
+          languageOptions: DEFAULT_ETA_LANGUAGE_OPTIONS,
+          defaultExtension: ".eta",
+        };
+      return mergeInstanceConfig(
+        base,
+        getEtaInstanceConfigFromExpression(expression.arguments[0], sourceFile),
+      );
+    }
+    return undefined;
+  }
 
   function visit(node: ts.Node): void {
     if (
       ts.isVariableDeclaration(node) &&
       ts.isIdentifier(node.name) &&
-      node.initializer &&
-      isNewEtaExpression(node.initializer)
+      node.initializer
     ) {
-      configs.set(
-        node.name.text,
-        getEtaConfigFromExpression(node.initializer.arguments?.[0]),
-      );
+      const config = configForExpression(node.initializer);
+      if (config) configs.set(node.name.text, config);
     }
 
     if (
@@ -364,9 +549,16 @@ function collectEtaInstanceConfigs(
       ts.isIdentifier(node.expression.expression)
     ) {
       const instanceName = node.expression.expression.text;
-      const base = configs.get(instanceName) ?? DEFAULT_ETA_LANGUAGE_OPTIONS;
-      const override = getEtaConfigFromExpression(node.arguments[0]);
-      configs.set(instanceName, applyNonDefaultEtaLanguageOptions(base, override));
+      const base = configs.get(instanceName);
+      if (base) {
+        configs.set(
+          instanceName,
+          mergeInstanceConfig(
+            base,
+            getEtaInstanceConfigFromExpression(node.arguments[0], sourceFile),
+          ),
+        );
+      }
     }
 
     ts.forEachChild(node, visit);
@@ -376,12 +568,44 @@ function collectEtaInstanceConfigs(
   return configs;
 }
 
-function mergeTemplateType(key: string, typeStr: string): void {
-  const existing = templateDataTypeMap.get(key);
-  templateDataTypeMap.set(
-    key,
-    existing && existing !== typeStr ? `${existing} & ${typeStr}` : typeStr,
+function templateKeysForWrite(key: string): string[] {
+  if (!path.isAbsolute(key)) return [key];
+  const basename = path.basename(key, path.extname(key));
+  const matchingTemplates = [...workspaceEtaFiles].filter(
+    (fileName) =>
+      path.basename(fileName, path.extname(fileName)).toLowerCase() ===
+      basename.toLowerCase(),
   );
+  return matchingTemplates.length === 1 ? [key, basename] : [key];
+}
+
+function setTemplateLanguageOptions(
+  key: string,
+  options: EtaLanguageOptions,
+): void {
+  for (const writeKey of templateKeysForWrite(key)) {
+    templateLanguageOptionsMap.set(writeKey, options);
+  }
+}
+
+function setTemplateResolutionOptions(
+  key: string,
+  options: EtaTemplateResolutionOptions,
+): void {
+  for (const writeKey of templateKeysForWrite(key)) {
+    templateResolutionOptionsMap.set(writeKey, options);
+  }
+}
+
+function mergeTemplateType(key: string, typeStr: string): void {
+  for (const writeKey of templateKeysForWrite(key)) {
+    const existing = templateDataTypeMap.get(writeKey);
+    if (!existing) {
+      templateDataTypeMap.set(writeKey, typeStr);
+    } else if (existing !== typeStr && !existing.includes(typeStr)) {
+      templateDataTypeMap.set(writeKey, `${existing} & ${typeStr}`);
+    }
+  }
 }
 
 function dataPathKey(dataPath: string[]): string {
@@ -407,24 +631,26 @@ function addTemplateDataDefinition(
     start: node.getStart(sourceFile),
     length: node.getWidth(sourceFile),
   };
-  let definitionsByPath = templateDataDefinitionMap.get(templateKey);
-  if (!definitionsByPath) {
-    definitionsByPath = new Map();
-    templateDataDefinitionMap.set(templateKey, definitionsByPath);
-  }
+  for (const writeKey of templateKeysForWrite(templateKey)) {
+    let definitionsByPath = templateDataDefinitionMap.get(writeKey);
+    if (!definitionsByPath) {
+      definitionsByPath = new Map();
+      templateDataDefinitionMap.set(writeKey, definitionsByPath);
+    }
 
-  const key = dataPathKey(dataPath);
-  const definitions = definitionsByPath.get(key) ?? [];
-  if (
-    !definitions.some(
-      (existing) =>
-        existing.fileName === definition.fileName &&
-        existing.start === definition.start &&
-        existing.length === definition.length,
-    )
-  ) {
-    definitions.push(definition);
-    definitionsByPath.set(key, definitions);
+    const key = dataPathKey(dataPath);
+    const definitions = definitionsByPath.get(key) ?? [];
+    if (
+      !definitions.some(
+        (existing) =>
+          existing.fileName === definition.fileName &&
+          existing.start === definition.start &&
+          existing.length === definition.length,
+      )
+    ) {
+      definitions.push(definition);
+      definitionsByPath.set(key, definitions);
+    }
   }
 }
 
@@ -507,11 +733,15 @@ function expressionDefinitionNode(
   expression: ts.Expression,
   checker: ts.TypeChecker,
 ): ts.Node {
-  const symbolNode = ts.isPropertyAccessExpression(expression)
-    ? expression.name
-    : ts.isElementAccessExpression(expression) && expression.argumentExpression
-      ? expression.argumentExpression
-      : expression;
+  let symbolNode: ts.Node = expression;
+  if (ts.isPropertyAccessExpression(expression)) {
+    symbolNode = expression.name;
+  } else if (
+    ts.isElementAccessExpression(expression) &&
+    expression.argumentExpression
+  ) {
+    symbolNode = expression.argumentExpression;
+  }
   const symbol = checker.getSymbolAtLocation(symbolNode);
   return (symbol && definitionNodeForSymbol(symbol)) ?? expression;
 }
@@ -520,56 +750,91 @@ function mergeTemplateDataDefinitions(
   targetKey: string,
   sourceKey: string,
 ): void {
-  const source = templateDataDefinitionMap.get(sourceKey);
+  const source =
+    templateDataDefinitionMap.get(sourceKey) ??
+    templateDataDefinitionMap.get(
+      path.basename(sourceKey, path.extname(sourceKey)),
+    );
   if (!source) return;
 
-  let target = templateDataDefinitionMap.get(targetKey);
-  if (!target) {
-    target = new Map();
-    templateDataDefinitionMap.set(targetKey, target);
-  }
-
-  for (const [key, definitions] of source) {
-    const targetDefinitions = target.get(key) ?? [];
-    for (const definition of definitions) {
-      if (
-        !targetDefinitions.some(
-          (existing) =>
-            existing.fileName === definition.fileName &&
-            existing.start === definition.start &&
-            existing.length === definition.length,
-        )
-      ) {
-        targetDefinitions.push(definition);
-      }
+  for (const writeKey of templateKeysForWrite(targetKey)) {
+    let target = templateDataDefinitionMap.get(writeKey);
+    if (!target) {
+      target = new Map();
+      templateDataDefinitionMap.set(writeKey, target);
     }
-    target.set(key, targetDefinitions);
+
+    for (const [key, definitions] of source) {
+      const targetDefinitions = target.get(key) ?? [];
+      for (const definition of definitions) {
+        if (
+          !targetDefinitions.some(
+            (existing) =>
+              existing.fileName === definition.fileName &&
+              existing.start === definition.start &&
+              existing.length === definition.length,
+          )
+        ) {
+          targetDefinitions.push(definition);
+        }
+      }
+      target.set(key, targetDefinitions);
+    }
   }
+}
+
+function templateKeyForReference(
+  templateName: string,
+  sourceFile: ts.SourceFile,
+  config?: EtaInstanceConfig,
+): string {
+  const resolved = resolveTemplatePath(templateName, {
+    fromFile: sourceFile.fileName,
+    views: config?.views,
+    defaultExtension: config?.defaultExtension,
+    templateFiles: workspaceEtaFiles,
+  });
+  if (resolved) return resolved;
+
+  const basename = path.basename(templateName, path.extname(templateName));
+  const basenameMatches = [...workspaceEtaFiles].filter(
+    (fileName) =>
+      path.basename(fileName, path.extname(fileName)).toLowerCase() ===
+      basename.toLowerCase(),
+  );
+  return basenameMatches.length > 1
+    ? `unresolved:${canonicalTemplatePath(sourceFile.fileName)}:${templateName}`
+    : basename;
 }
 
 function recordRenderCallType(
   templateName: string,
   dataArg: ts.Expression,
   checker: ts.TypeChecker,
-  languageOptions?: EtaLanguageOptions,
+  sourceFile: ts.SourceFile,
+  config?: EtaInstanceConfig,
 ): void {
-  const basename = path.basename(templateName, path.extname(templateName));
-  if (languageOptions) {
-    templateLanguageOptionsMap.set(basename, languageOptions);
+  const templateKey = templateKeyForReference(templateName, sourceFile, config);
+  if (config) {
+    setTemplateLanguageOptions(templateKey, config.languageOptions);
+    setTemplateResolutionOptions(templateKey, {
+      views: config.views,
+      defaultExtension: config.defaultExtension,
+    });
   }
   try {
     const type = checker.getTypeAtLocation(dataArg);
     const typeStr = typeToStructuralString(checker, type);
     if (typeStr === "any" || typeStr === "unknown") return;
-    mergeTemplateType(basename, typeStr);
+    mergeTemplateType(templateKey, typeStr);
     addTemplateDataDefinition(
-      basename,
+      templateKey,
       [],
       expressionDefinitionNode(dataArg, checker),
     );
-    collectTypeDataDefinitions(basename, checker, type, [], dataArg);
+    collectTypeDataDefinitions(templateKey, checker, type, [], dataArg);
   } catch {
-    // type extraction failed for this call; skip
+    // Type extraction failed for this call; skip it.
   }
 }
 
@@ -577,50 +842,197 @@ function withLayoutBody(typeStr: string): string {
   if (/\bbody\??:/.test(typeStr)) return typeStr;
   const trimmed = typeStr.trim();
   if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-    return trimmed.replace(/\s*}$/, "; body: string }");
+    return `${trimmed.slice(0, -1).trimEnd()}; body: string }`;
   }
   return `{ body: string } & ${trimmed}`;
 }
 
-function extractLayoutTemplateNames(
-  source: string,
-  options: EtaLanguageOptions,
-): string[] {
-  const names: string[] = [];
-  for (const range of findEtaTagRanges(source, options)) {
-    const content = source.slice(range.contentStart, range.end);
-    const matches = content.matchAll(/\blayout\s*\(\s*["']([^"']+)["']/g);
-    for (const match of matches) {
-      const layoutName = match[1];
-      if (layoutName) names.push(layoutName);
-    }
-  }
-  return names;
+function templateKeyFromPath(filePath: string): string {
+  return canonicalTemplatePath(filePath);
 }
 
-function templateKeyFromPath(filePath: string): string {
-  return path.basename(filePath, path.extname(filePath));
+function expressionToStructuralString(
+  expression: ts.Expression,
+): string | undefined {
+  if (ts.isStringLiteralLike(expression)) return "string";
+  if (ts.isNumericLiteral(expression)) return "number";
+  if (
+    expression.kind === ts.SyntaxKind.TrueKeyword ||
+    expression.kind === ts.SyntaxKind.FalseKeyword
+  ) {
+    return "boolean";
+  }
+  if (ts.isArrayLiteralExpression(expression)) {
+    const elementTypes = [
+      ...new Set(
+        expression.elements
+          .map((element) =>
+            ts.isExpression(element)
+              ? expressionToStructuralString(element)
+              : undefined,
+          )
+          .filter((value): value is string => value !== undefined),
+      ),
+    ];
+    return `Array<${elementTypes.join(" | ") || "unknown"}>`;
+  }
+  if (ts.isObjectLiteralExpression(expression)) {
+    const properties = expression.properties.flatMap((property) => {
+      if (!ts.isPropertyAssignment(property)) return [];
+      const name = getPropertyName(property.name);
+      const type = expressionToStructuralString(property.initializer);
+      return name && type ? [`${name}: ${type}`] : [];
+    });
+    return `{ ${properties.join("; ")} }`;
+  }
+  return undefined;
+}
+
+const TEMPLATE_RELATIONSHIP_HELPERS = new Set([
+  "include",
+  "includeAsync",
+  "layout",
+]);
+
+type TemplateRelationshipCall = ts.CallExpression & {
+  expression: ts.Identifier;
+};
+
+interface TemplateRelationshipContext {
+  etaFile: string;
+  sourceKey: string;
+  sourceType: string;
+  options: EtaLanguageOptions;
+  resolution: EtaTemplateResolutionOptions | undefined;
+}
+
+function isTemplateRelationshipCall(
+  node: ts.Node,
+): node is TemplateRelationshipCall {
+  return (
+    ts.isCallExpression(node) &&
+    ts.isIdentifier(node.expression) &&
+    TEMPLATE_RELATIONSHIP_HELPERS.has(node.expression.text)
+  );
+}
+
+function getRelationshipTargetKey(
+  call: TemplateRelationshipCall,
+  context: TemplateRelationshipContext,
+): string | undefined {
+  const templateArgument = call.arguments[0];
+  if (!templateArgument) return undefined;
+  const templateName = getStringLiteralValue(templateArgument);
+  if (templateName === undefined) return undefined;
+  return (
+    resolveTemplatePath(templateName, {
+      fromFile: context.etaFile,
+      views: context.resolution?.views,
+      defaultExtension: context.resolution?.defaultExtension,
+      templateFiles: workspaceEtaFiles,
+    }) ?? path.basename(templateName, path.extname(templateName))
+  );
+}
+
+function getPropagatedRelationshipType(
+  call: TemplateRelationshipCall,
+  sourceType: string,
+): string {
+  let propagatedType = sourceType;
+  const dataArgument = call.arguments[1];
+  if (dataArgument) {
+    const explicitType = expressionToStructuralString(dataArgument);
+    if (explicitType) propagatedType = `${sourceType} & ${explicitType}`;
+  }
+  return call.expression.text === "layout"
+    ? withLayoutBody(propagatedType)
+    : propagatedType;
+}
+
+function recordTemplateRelationship(
+  call: TemplateRelationshipCall,
+  context: TemplateRelationshipContext,
+): void {
+  const targetKey = getRelationshipTargetKey(call, context);
+  if (!targetKey || targetKey === context.sourceKey) return;
+
+  mergeTemplateType(
+    targetKey,
+    getPropagatedRelationshipType(call, context.sourceType),
+  );
+  mergeTemplateDataDefinitions(targetKey, context.sourceKey);
+  if (!templateLanguageOptionsMap.has(targetKey)) {
+    setTemplateLanguageOptions(targetKey, context.options);
+  }
+  if (
+    context.resolution &&
+    !templateResolutionOptionsMap.has(targetKey)
+  ) {
+    setTemplateResolutionOptions(targetKey, context.resolution);
+  }
+}
+
+function analyzeTemplateRelationships(
+  etaFile: string,
+  source: string,
+  sourceType: string,
+  options: EtaLanguageOptions,
+): void {
+  const virtualFileName = `${etaFile}.ts`;
+  const virtual = buildVirtualDocument(source, sourceType, options);
+  const sourceFile = ts.createSourceFile(
+    virtualFileName,
+    virtual.content,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const sourceKey = templateKeyFromPath(etaFile);
+  const context: TemplateRelationshipContext = {
+    etaFile,
+    sourceKey,
+    sourceType,
+    options,
+    resolution:
+      templateResolutionOptionsMap.get(sourceKey) ??
+      templateResolutionOptionsMap.get(
+        path.basename(etaFile, path.extname(etaFile)),
+      ),
+  };
+
+  function visit(node: ts.Node): void {
+    if (isTemplateRelationshipCall(node)) {
+      recordTemplateRelationship(node, context);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
 }
 
 export function analyzeEtaTemplateLayouts(etaFiles: string[]): void {
-  for (const etaFile of etaFiles) {
-    const childKey = templateKeyFromPath(etaFile);
-    const childType = templateDataTypeMap.get(childKey);
-    if (!childType) continue;
-
-    const source = ts.sys.readFile(etaFile);
-    if (source === undefined) continue;
-
-    const options =
-      templateLanguageOptionsMap.get(childKey) ?? DEFAULT_ETA_LANGUAGE_OPTIONS;
-    for (const layoutName of extractLayoutTemplateNames(source, options)) {
-      const layoutKey = templateKeyFromPath(layoutName);
-      if (layoutKey === childKey) continue;
-      mergeTemplateType(layoutKey, withLayoutBody(childType));
-      mergeTemplateDataDefinitions(layoutKey, childKey);
-      if (!templateLanguageOptionsMap.has(layoutKey)) {
-        templateLanguageOptionsMap.set(layoutKey, options);
-      }
+  for (const etaFile of etaFiles) workspaceEtaFiles.add(etaFile);
+  for (let pass = 0; pass < MAX_TYPE_DEPTH; pass++) {
+    const before = new Map(templateDataTypeMap);
+    for (const etaFile of etaFiles) {
+      const templateKey = templateKeyFromPath(etaFile);
+      const sourceType =
+        templateDataTypeMap.get(templateKey) ??
+        templateDataTypeMap.get(path.basename(etaFile, path.extname(etaFile)));
+      if (!sourceType) continue;
+      const source = ts.sys.readFile(etaFile);
+      if (source === undefined) continue;
+      const basename = path.basename(etaFile, path.extname(etaFile));
+      const options =
+        templateLanguageOptionsMap.get(templateKey) ??
+        templateLanguageOptionsMap.get(basename) ??
+        DEFAULT_ETA_LANGUAGE_OPTIONS;
+      analyzeTemplateRelationships(etaFile, source, sourceType, options);
+    }
+    if (
+      before.size === templateDataTypeMap.size &&
+      [...before].every(([key, value]) => templateDataTypeMap.get(key) === value)
+    ) {
+      break;
     }
   }
 }
@@ -633,20 +1045,82 @@ export function analyzeFileForEtaCalls(
   sourceFile: ts.SourceFile,
   checker: ts.TypeChecker,
 ): void {
-  const etaInstanceConfigs = collectEtaInstanceConfigs(sourceFile);
+  const etaInstanceConfigs = collectEtaInstanceConfigs(sourceFile, checker);
+
+  function configForRenderCall(
+    call: ts.CallExpression,
+  ): EtaInstanceConfig | undefined {
+    if (!ts.isPropertyAccessExpression(call.expression)) return undefined;
+    const receiver = call.expression.expression;
+    if (ts.isIdentifier(receiver)) return etaInstanceConfigs.get(receiver.text);
+    if (
+      ts.isCallExpression(receiver) &&
+      ts.isPropertyAccessExpression(receiver.expression) &&
+      receiver.expression.name.text === "withConfig"
+    ) {
+      const baseReceiver = receiver.expression.expression;
+      const base =
+        (ts.isIdentifier(baseReceiver)
+          ? etaInstanceConfigs.get(baseReceiver.text)
+          : undefined) ?? {
+          languageOptions: DEFAULT_ETA_LANGUAGE_OPTIONS,
+          defaultExtension: ".eta",
+        };
+      return mergeInstanceConfig(
+        base,
+        getEtaInstanceConfigFromExpression(receiver.arguments[0], sourceFile),
+      );
+    }
+    return undefined;
+  }
+
+  function isEtaRenderCall(
+    call: ts.CallExpression,
+    methodName: string,
+  ): boolean {
+    if (ts.isIdentifier(call.expression)) {
+      return (
+        symbolComesFromEta(call.expression, checker) ||
+        ETA_NAMED_TEMPLATE_RENDER_METHODS.has(call.expression.text)
+      );
+    }
+    if (!ts.isPropertyAccessExpression(call.expression)) return false;
+    const receiver = call.expression.expression;
+    if (ts.isIdentifier(receiver)) {
+      return (
+        etaInstanceConfigs.has(receiver.text) ||
+        receiver.text.toLowerCase() === "eta" ||
+        symbolComesFromEta(receiver, checker) ||
+        symbolComesFromEta(call.expression.name, checker)
+      );
+    }
+    const config = configForRenderCall(call);
+    return (
+      config !== undefined ||
+      (methodName.startsWith("render") &&
+        symbolComesFromEta(call.expression.name, checker))
+    );
+  }
 
   function visit(node: ts.Node): void {
     if (ts.isCallExpression(node)) {
       const methodName = getCalledMethodName(node.expression);
-      if (methodName && ETA_NAMED_TEMPLATE_RENDER_METHODS.has(methodName)) {
-        const args = node.arguments;
-        if (args.length >= 2 && ts.isStringLiteral(args[0])) {
-          const receiverName = getCallReceiverName(node.expression);
+      if (
+        methodName &&
+        ETA_NAMED_TEMPLATE_RENDER_METHODS.has(methodName) &&
+        isEtaRenderCall(node, methodName)
+      ) {
+        const templateName = node.arguments[0]
+          ? getStringLiteralValue(node.arguments[0])
+          : undefined;
+        const dataArgument = node.arguments[1];
+        if (templateName !== undefined && dataArgument) {
           recordRenderCallType(
-            args[0].text,
-            args[1],
+            templateName,
+            dataArgument,
             checker,
-            receiverName ? etaInstanceConfigs.get(receiverName) : undefined,
+            sourceFile,
+            configForRenderCall(node),
           );
         }
       }
@@ -683,38 +1157,84 @@ function analyzeOneSourceFile(
 export function analyzeWorkspaceFiles(
   rootNames: string[],
   hooks: WorkspaceAnalysisHooks = {},
+  projects: WorkspaceProject[] = [],
 ): void {
   try {
-    const program = ts.createProgram({
-      rootNames,
-      options: {
-        allowJs: true,
-        checkJs: false,
-        target: ts.ScriptTarget.ES2020,
-        module: ts.ModuleKind.ESNext,
-        moduleResolution: ts.ModuleResolutionKind.Bundler,
-        noEmit: true,
-        skipLibCheck: true,
-      },
-    });
-    const checker = program.getTypeChecker();
-    const rootSet = new Set(rootNames);
-    for (const sf of program.getSourceFiles()) {
-      if (sf.isDeclarationFile || !rootSet.has(sf.fileName)) continue;
-      analyzeOneSourceFile(sf, checker, hooks);
+    const configuredProjects =
+      projects.length > 0
+        ? projects
+        : [
+            {
+              root: process.cwd(),
+              rootNames,
+              options: DEFAULT_COMPILER_OPTIONS,
+            },
+          ];
+    const analyzedFiles = new Set<string>();
+    for (const project of configuredProjects) {
+      const program = ts.createProgram({
+        rootNames: project.rootNames,
+        options: project.options,
+      });
+      const checker = program.getTypeChecker();
+      const rootSet = new Set(project.rootNames.map((file) => path.normalize(file)));
+      for (const sourceFile of program.getSourceFiles()) {
+        const fileName = path.normalize(sourceFile.fileName);
+        if (
+          sourceFile.isDeclarationFile ||
+          !rootSet.has(fileName) ||
+          analyzedFiles.has(fileName)
+        ) {
+          continue;
+        }
+        analyzedFiles.add(fileName);
+        analyzeOneSourceFile(sourceFile, checker, hooks);
+      }
     }
     analyzeEtaTemplateLayouts([...workspaceEtaFiles]);
-  } catch (e) {
-    hooks.onFailure?.(e);
+  } catch (error) {
+    hooks.onFailure?.(error);
   }
 }
 
-/** Return the `it` type inferred for this template URI, or the default. */
+export function getWorkspaceProjectForFile(
+  fileName: string,
+): WorkspaceProject | undefined {
+  const normalized = canonicalTemplatePath(fileName);
+  return workspaceProjects
+    .filter((project) => {
+      const relative = path.relative(
+        canonicalTemplatePath(project.root),
+        normalized,
+      );
+      return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+    })
+    .sort((left, right) => right.root.length - left.root.length)[0];
+}
+
+function mapKeyForTemplateUri<T>(
+  uri: string,
+  values: Map<string, T>,
+): string | undefined {
+  const fsPath = fileURLToPath(uri);
+  const exact = canonicalTemplatePath(fsPath);
+  if (values.has(exact)) return exact;
+
+  const basename = path.basename(fsPath, path.extname(fsPath));
+  if (values.has(basename)) return basename;
+  const matches = [...values.keys()].filter(
+    (key) =>
+      path.basename(key, path.extname(key)).toLowerCase() ===
+      basename.toLowerCase(),
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** Return the data type inferred for this template URI, or the default. */
 export function getItTypeForUri(uri: string): string {
   try {
-    const fsPath = fileURLToPath(uri);
-    const basename = path.basename(fsPath, path.extname(fsPath));
-    return templateDataTypeMap.get(basename) ?? DEFAULT_IT_TYPE;
+    const key = mapKeyForTemplateUri(uri, templateDataTypeMap);
+    return (key && templateDataTypeMap.get(key)) ?? DEFAULT_IT_TYPE;
   } catch {
     return DEFAULT_IT_TYPE;
   }
@@ -726,10 +1246,11 @@ export function getDataDefinitionsForUri(
   dataPath: string[],
 ): EtaDataDefinition[] {
   try {
-    const fsPath = fileURLToPath(uri);
-    const basename = path.basename(fsPath, path.extname(fsPath));
+    const key = mapKeyForTemplateUri(uri, templateDataDefinitionMap);
     return (
-      templateDataDefinitionMap.get(basename)?.get(dataPathKey(dataPath)) ?? []
+      (key &&
+        templateDataDefinitionMap.get(key)?.get(dataPathKey(dataPath))) ||
+      []
     );
   } catch {
     return [];
@@ -740,9 +1261,19 @@ export function getEtaLanguageOptionsForUri(
   uri: string,
 ): EtaLanguageOptions | undefined {
   try {
-    const fsPath = fileURLToPath(uri);
-    const basename = path.basename(fsPath, path.extname(fsPath));
-    return templateLanguageOptionsMap.get(basename);
+    const key = mapKeyForTemplateUri(uri, templateLanguageOptionsMap);
+    return key ? templateLanguageOptionsMap.get(key) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function getTemplateResolutionOptionsForUri(
+  uri: string,
+): EtaTemplateResolutionOptions | undefined {
+  try {
+    const key = mapKeyForTemplateUri(uri, templateResolutionOptionsMap);
+    return key ? templateResolutionOptionsMap.get(key) : undefined;
   } catch {
     return undefined;
   }

@@ -17,6 +17,7 @@ import {
   typeToStructuralString,
   workspaceEtaFiles,
   workspaceTsFiles,
+  workspaceProjects,
 } from "../src/typeInference";
 
 // ── Test helpers ────────────────────────────────────────────────────────────────
@@ -384,6 +385,43 @@ describe("analyzeFileForEtaCalls", () => {
     expect(type).toMatch(/body: string/);
   });
 
+  it("propagates inherited and explicit include data to partials", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eta-include-flow-"));
+    const parentPath = path.join(dir, "parent-flow.eta");
+    const partialPath = path.join(dir, "partial-flow.eta");
+    fs.writeFileSync(
+      parentPath,
+      '<%~ include("./partial-flow", { localLabel: "Hi" }) %>',
+    );
+    fs.writeFileSync(partialPath, "<%= it.parentId %> <%= it.localLabel %>");
+    templateDataTypeMap.set("parent-flow", "{ parentId: number }");
+
+    analyzeEtaTemplateLayouts([parentPath, partialPath]);
+
+    const partialType = templateDataTypeMap.get("partial-flow");
+    expect(partialType).toMatch(/parentId: number/);
+    expect(partialType).toMatch(/localLabel: string/);
+  });
+
+  it("merges explicit layout data and generated body", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "eta-layout-data-"));
+    const childPath = path.join(dir, "child-flow.eta");
+    const layoutPath = path.join(dir, "layout-flow.eta");
+    fs.writeFileSync(
+      childPath,
+      '<% layout("./layout-flow", { theme: "dark" }) %>',
+    );
+    fs.writeFileSync(layoutPath, "");
+    templateDataTypeMap.set("child-flow", "{ title: string }");
+
+    analyzeEtaTemplateLayouts([childPath, layoutPath]);
+
+    const layoutType = templateDataTypeMap.get("layout-flow");
+    expect(layoutType).toMatch(/title: string/);
+    expect(layoutType).toMatch(/theme: string/);
+    expect(layoutType).toMatch(/body: string/);
+  });
+
   it("merges multiple call sites for the same template via intersection", () => {
     const { checker, sf } = makeTestProgram(
       `declare function render(t: string, d: any): string;\n` +
@@ -479,6 +517,63 @@ describe("analyzeFileForEtaCalls", () => {
     expect(dashboard).toMatch(/visits: number/);
     expect(dashboard).not.toMatch(/heading:/);
   });
+  it("accepts no-substitution template literals and withConfig instances", () => {
+    const { checker, sf } = makeTestProgram(
+      `declare class Eta {
+         constructor(config?: unknown);
+         withConfig(config: unknown): Eta;
+         render(name: string, data: unknown): string;
+       }
+       const eta = new Eta();
+       const configured = eta.withConfig({ varName: "data" });
+       configured.render(\`profile\`, { name: "Ada" });`,
+    );
+    analyzeFileForEtaCalls(sf, checker);
+
+    expect(templateDataTypeMap.get("profile")).toMatch(/name: string/);
+    expect(templateLanguageOptionsMap.get("profile")?.varName).toBe("data");
+  });
+
+  it("ignores render methods on unrelated receivers", () => {
+    const { checker, sf } = makeTestProgram(
+      `declare const report: { render(name: string, data: unknown): string };
+       report.render("profile", { leaked: true });`,
+    );
+    analyzeFileForEtaCalls(sf, checker);
+    expect(templateDataTypeMap.size).toBe(0);
+  });
+
+  it("keeps same-basename templates isolated by resolved views path", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "eta-identities-"));
+    const admin = path.join(root, "admin", "profile.eta");
+    const account = path.join(root, "account", "profile.eta");
+    fs.mkdirSync(path.dirname(admin), { recursive: true });
+    fs.mkdirSync(path.dirname(account), { recursive: true });
+    fs.writeFileSync(admin, "");
+    fs.writeFileSync(account, "");
+    workspaceEtaFiles.add(admin);
+    workspaceEtaFiles.add(account);
+    const { checker, sf } = makeTestProgram(
+      `declare class Eta {
+         constructor(config?: unknown);
+         render(name: string, data: unknown): string;
+       }
+       const adminEta = new Eta({ views: ${JSON.stringify(path.dirname(admin))} });
+       const accountEta = new Eta({ views: ${JSON.stringify(path.dirname(account))} });
+       adminEta.render("profile", { adminOnly: true });
+       accountEta.render("profile", { accountOnly: true });`,
+    );
+    analyzeFileForEtaCalls(sf, checker);
+
+    const adminType = getItTypeForUri(pathToFileURL(admin).toString());
+    const accountType = getItTypeForUri(pathToFileURL(account).toString());
+    workspaceEtaFiles.delete(admin);
+    workspaceEtaFiles.delete(account);
+    expect(adminType).toContain("adminOnly");
+    expect(adminType).not.toContain("accountOnly");
+    expect(accountType).toContain("accountOnly");
+    expect(accountType).not.toContain("adminOnly");
+  });
 });
 
 // ── getItTypeForUri ────────────────────────────────────────────────────────────────
@@ -552,12 +647,15 @@ describe("Integration: real eta package type inference", () => {
 
     analyzeFileForEtaCalls(sf, checker);
 
-    // greeting.eta → { heading: string; count: number }
-    expect(templateDataTypeMap.get("greeting")).toMatch(/heading: string/);
-    expect(templateDataTypeMap.get("greeting")).toMatch(/count: number/);
-
-    // dashboard.eta → { title: string; stats: { visits: number; revenue: number } }
-    const dashType = templateDataTypeMap.get("dashboard");
+    const demoViews = path.join(path.dirname(demoIndexPath), "../views");
+    const greetingType = getItTypeForUri(
+      pathToFileURL(path.join(demoViews, "greeting.eta")).toString(),
+    );
+    const dashType = getItTypeForUri(
+      pathToFileURL(path.join(demoViews, "dashboard.eta")).toString(),
+    );
+    expect(greetingType).toMatch(/heading: string/);
+    expect(greetingType).toMatch(/count: number/);
     expect(dashType).toMatch(/title: string/);
     expect(dashType).toMatch(/stats:/);
     expect(dashType).toMatch(/visits: number/);
@@ -605,8 +703,12 @@ describe("Integration: real eta package type inference", () => {
         analyzeFileForEtaCalls(sf, checker);
       }
 
-      const greeting = templateDataTypeMap.get("greeting");
-      const dashboard = templateDataTypeMap.get("dashboard");
+      const greeting = getItTypeForUri(
+        pathToFileURL(path.join(workspaceDir, "demo/views/greeting.eta")).toString(),
+      );
+      const dashboard = getItTypeForUri(
+        pathToFileURL(path.join(workspaceDir, "demo/views/dashboard.eta")).toString(),
+      );
 
       expect(greeting).toMatch(/heading: string/);
       expect(greeting).toMatch(/count: number/);
@@ -627,6 +729,7 @@ describe("scanWorkspaceFiles", () => {
   beforeEach(() => {
     workspaceTsFiles.clear();
     workspaceEtaFiles.clear();
+    workspaceProjects.length = 0;
   });
 
   it("never includes files from any node_modules directory", () => {
@@ -652,6 +755,34 @@ describe("scanWorkspaceFiles", () => {
       true,
     );
   });
+  it("loads tsconfig compiler options and project roots", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "eta-tsconfig-"));
+    fs.mkdirSync(path.join(root, "src"));
+    fs.writeFileSync(path.join(root, "src", "index.ts"), "export {};");
+    fs.writeFileSync(
+      path.join(root, "tsconfig.json"),
+      JSON.stringify({
+        compilerOptions: {
+          baseUrl: ".",
+          paths: { "@app/*": ["src/*"] },
+          jsx: "react-jsx",
+        },
+        include: ["src/**/*.ts"],
+      }),
+    );
+
+    scanWorkspaceFiles(root);
+
+    expect(workspaceProjects).toHaveLength(1);
+    expect(workspaceProjects[0].options.paths?.["@app/*"]).toEqual(["src/*"]);
+    expect(workspaceProjects[0].options.jsx).toBe(ts.JsxEmit.ReactJSX);
+    expect(
+      workspaceProjects[0].rootNames.some((fileName) =>
+        fileName.replace(/\\/g, "/").endsWith("src/index.ts"),
+      ),
+    ).toBe(true);
+  });
+
 });
 
 // ── greeting vs dashboard regression ─────────────────────────────────────────

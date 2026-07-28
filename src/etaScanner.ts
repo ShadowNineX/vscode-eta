@@ -9,13 +9,15 @@ type Quote = '"' | "'" | "`";
 
 interface TagContentState {
   quote: Quote | undefined;
-  lineComment: boolean;
   blockComment: boolean;
 }
+
+export type UnclosedTagState = "string" | "block-comment";
 
 export interface TagContentChunk {
   js: string;
   next: number;
+  unclosedState?: UnclosedTagState;
 }
 
 export interface EtaTagRange {
@@ -24,6 +26,7 @@ export interface EtaTagRange {
   end: number;
   closed: boolean;
   empty: boolean;
+  unclosedState?: UnclosedTagState;
 }
 
 /** Consume the <% opener and its modifier chars; returns chars consumed and new index. */
@@ -61,14 +64,6 @@ export function consumeTagOpener(
   };
 }
 
-function consumeLineCommentChar(
-  line: string,
-  index: number,
-  state: TagContentState,
-): TagContentChunk {
-  state.lineComment = line[index] !== "\n";
-  return { js: line[index], next: index + 1 };
-}
 
 function consumeBlockCommentChar(
   line: string,
@@ -101,7 +96,6 @@ function consumeActiveTagState(
   index: number,
   state: TagContentState,
 ): TagContentChunk | undefined {
-  if (state.lineComment) return consumeLineCommentChar(line, index, state);
   if (state.blockComment) return consumeBlockCommentChar(line, index, state);
   if (state.quote) return consumeQuotedChar(line, index, state);
   return undefined;
@@ -113,10 +107,6 @@ function consumeStateStart(
   state: TagContentState,
 ): TagContentChunk | undefined {
   const pair = line.slice(index, index + 2);
-  if (pair === "//") {
-    state.lineComment = true;
-    return { js: pair, next: index + 2 };
-  }
   if (pair === "/*") {
     state.blockComment = true;
     return { js: pair, next: index + 2 };
@@ -155,7 +145,6 @@ export function consumeTagContent(
 ): TagContentChunk {
   const state: TagContentState = {
     quote: undefined,
-    lineComment: false,
     blockComment: false,
   };
   let js = "";
@@ -175,7 +164,13 @@ export function consumeTagContent(
     js += line[i];
     i++;
   }
-  return { js, next: i };
+  let unclosedState: UnclosedTagState | undefined;
+  if (state.quote) {
+    unclosedState = "string";
+  } else if (state.blockComment) {
+    unclosedState = "block-comment";
+  }
+  return { js, next: i, unclosedState };
 }
 
 export function isClosedTagContent(
@@ -203,10 +198,12 @@ function consumeEtaTagRange(
   const opener = consumeTagOpener(source, start, options);
   let cursor = opener.next;
   let content = "";
+  let unclosedState: UnclosedTagState | undefined;
 
   while (cursor < source.length) {
     const consumed = consumeTagContent(source, cursor, options);
     content += consumed.js;
+    unclosedState = consumed.unclosedState;
     cursor = consumed.next;
     if (isClosedTagContent(source, opener.next, cursor, options)) {
       return {
@@ -225,6 +222,7 @@ function consumeEtaTagRange(
     end: cursor,
     closed: false,
     empty: content.trim().length === 0,
+    unclosedState,
   };
 }
 

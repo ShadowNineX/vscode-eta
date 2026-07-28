@@ -38,6 +38,11 @@ describe("isInsideEtaTag", () => {
     expect(isInsideEtaTag("<% let x = 1", 8)).toBe(true);
   });
 
+  it("returns true at the end of an unclosed tag for completion requests", () => {
+    const line = '<% include("./par';
+    expect(isInsideEtaTag(line, line.length)).toBe(true);
+  });
+
   it("returns false for empty string", () => {
     expect(isInsideEtaTag("", 0)).toBe(false);
   });

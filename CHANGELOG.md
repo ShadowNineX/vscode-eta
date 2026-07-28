@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Added Eta helper signature help, TypeScript diagnostics, references, rename, and semantic tokens for configured custom tags.
+- Added include/layout path completion and navigation plus named-block navigation.
+- Made template inference collision-safe with resolved paths, workspace `tsconfig.json`/`jsconfig.json` options, multiple workspace folders, template literals, `withConfig`, and symbol-aware render detection.
+- Propagated inherited and explicit include/layout data across templates.
+- Matched Eta runtime behavior for line-comment delimiters, custom `varName`, raw multiline `functionHeader`, and output coercion; diagnostics now identify unclosed strings and block comments.
+
 ## 0.2.1
 
 - Migrated extension bundling from tsup to tsdown while preserving CommonJS entry files and packaged TypeScript standard-library declarations.

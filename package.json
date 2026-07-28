@@ -27,9 +27,6 @@
     "intellisense",
     "syntax"
   ],
-  "activationEvents": [
-    "onLanguage:eta"
-  ],
   "main": "./out/extension.js",
   "devDependencies": {
     "@types/node": "^25.8.0",

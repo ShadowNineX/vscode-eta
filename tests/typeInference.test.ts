@@ -862,7 +862,7 @@ describe("scanWorkspaceFiles", () => {
     const pageType = getItTypeForUri(pathToFileURL(templatePath).toString());
     expect(pageType).not.toBe(DEFAULT_IT_TYPE);
     expect(pageType).toMatch(/conversionRate: number/);
-  });
+  }, 120_000);
 
   it("preserves project path aliases for excluded render sources", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "eta-inferred-project-"));

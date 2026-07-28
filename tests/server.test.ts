@@ -3,6 +3,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  getDataDefinitionsForUri,
+  templateDataDefinitionMap,
+  templateDataTypeMap,
+} from "../src/typeInference";
 
 const mocks = vi.hoisted(() => {
   return {
@@ -63,7 +68,7 @@ vi.mock("vscode-languageserver-textdocument", () => ({
 describe("server entrypoint", () => {
   it("registers LSP handlers and starts listening", async () => {
     // Import after Vitest installs mocks because the entrypoint registers on load.
-    const server = await import("../src/server");
+    await import("../src/server");
 
     expect(mocks.connection.onInitialize).toHaveBeenCalledTimes(1);
     const initialize = mocks.connection.onInitialize.mock.calls[0][0];
@@ -109,11 +114,11 @@ describe("server entrypoint", () => {
     );
     fs.writeFileSync(renderSourcePath, renderSource);
     const nameStart = renderSource.indexOf("name");
-    server.templateDataTypeMap.set(
+    templateDataTypeMap.set(
       "template",
       "{ user: { name: string } }",
     );
-    server.templateDataDefinitionMap.set(
+    templateDataDefinitionMap.set(
       "template",
       new Map([
         [
@@ -130,7 +135,7 @@ describe("server entrypoint", () => {
     );
 
     expect(
-      server.getDataDefinitionsForUri(document.uri, ["user", "name"]),
+      getDataDefinitionsForUri(document.uri, ["user", "name"]),
     ).toHaveLength(1);
 
     const dataSource = "<%= it.user.name %>";

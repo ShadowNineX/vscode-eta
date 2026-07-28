@@ -39,40 +39,6 @@ import {
   workspaceTsFiles,
 } from "./typeInference";
 
-export {
-  consumeTagContent,
-  consumeTagOpener,
-  findEtaTagRanges,
-} from "./etaScanner";
-export type { EtaTagRange } from "./etaScanner";
-export {
-  buildPreamble,
-  buildVirtualContent,
-  buildVirtualLine,
-  DEFAULT_IT_TYPE,
-  PREAMBLE_LINE_COUNT,
-} from "./virtualDocument";
-export {
-  isInsideEtaTag,
-  isInsideEtaTagInText,
-  positionToOffset,
-} from "./position";
-export { tsKindToLSP } from "./lspKind";
-export {
-  analyzeFileForEtaCalls,
-  analyzeEtaTemplateLayouts,
-  getDataDefinitionsForUri,
-  analyzeWorkspaceFiles,
-  getEtaLanguageOptionsForUri,
-  getItTypeForUri,
-  scanWorkspaceFiles,
-  templateDataTypeMap,
-  templateDataDefinitionMap,
-  templateLanguageOptionsMap,
-  workspaceEtaFiles,
-  typeToStructuralString,
-  workspaceTsFiles,
-} from "./typeInference";
 
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
@@ -300,36 +266,51 @@ connection.onDidChangeWatchedFiles((params) => {
   if (needsReanalysis) runWorkspaceAnalysis();
 });
 
-connection.onCompletion((params: TextDocumentPositionParams) => {
+interface VirtualPosition {
+  docText: string;
+  options: EtaLanguageOptions;
+  virtualContent: string;
+  virtualOffset: number;
+  virtualPath: string;
+}
+
+function getVirtualPosition(
+  params: TextDocumentPositionParams,
+): VirtualPosition | undefined {
   const doc = documents.get(params.textDocument.uri);
-  if (!doc) return [];
+  if (!doc) return undefined;
 
   const docText = doc.getText();
+  const options = getDocumentLanguageOptions(params.textDocument.uri);
   if (
     !isInsideEtaTagInText(
       docText,
       params.position.line,
       params.position.character,
-      getDocumentLanguageOptions(params.textDocument.uri),
+      options,
     )
   ) {
-    return [];
+    return undefined;
   }
 
   const virtualPath = getVirtualPath(params.textDocument.uri);
   updateVirtualFile(params.textDocument.uri, docText);
-
   const virtualContent = virtualContents.get(virtualPath) ?? "";
-  const virtualLine = params.position.line + PREAMBLE_LINE_COUNT;
   const virtualOffset = positionToOffset(
     virtualContent,
-    virtualLine,
+    params.position.line + PREAMBLE_LINE_COUNT,
     params.position.character,
   );
+  return { docText, options, virtualContent, virtualOffset, virtualPath };
+}
+
+connection.onCompletion((params: TextDocumentPositionParams) => {
+  const virtual = getVirtualPosition(params);
+  if (!virtual) return [];
 
   const completions = getLanguageService().getCompletionsAtPosition(
-    virtualPath,
-    virtualOffset,
+    virtual.virtualPath,
+    virtual.virtualOffset,
     { includeCompletionsForModuleExports: false },
   );
 
@@ -355,32 +336,31 @@ function locationFromOffsets(
   };
 }
 
+function locationFromFileOffsets(
+  fileName: string,
+  start: number,
+  length: number,
+): Location | undefined {
+  const resolvedFileName = path.isAbsolute(fileName)
+    ? fileName
+    : path.resolve(workspaceRoot ?? process.cwd(), fileName);
+  const content = ts.sys.readFile(resolvedFileName);
+  return content === undefined
+    ? undefined
+    : locationFromOffsets(
+        pathToFileURL(resolvedFileName).toString(),
+        content,
+        start,
+        length,
+      );
+}
+
 connection.onDefinition(
   (params: TextDocumentPositionParams): Location[] | null => {
-    const doc = documents.get(params.textDocument.uri);
-    if (!doc) return null;
-
-    const docText = doc.getText();
-    const options = getDocumentLanguageOptions(params.textDocument.uri);
-    if (
-      !isInsideEtaTagInText(
-        docText,
-        params.position.line,
-        params.position.character,
-        options,
-      )
-    ) {
-      return null;
-    }
-
-    const virtualPath = getVirtualPath(params.textDocument.uri);
-    updateVirtualFile(params.textDocument.uri, docText);
-    const virtualContent = virtualContents.get(virtualPath) ?? "";
-    const virtualOffset = positionToOffset(
-      virtualContent,
-      params.position.line + PREAMBLE_LINE_COUNT,
-      params.position.character,
-    );
+    const virtual = getVirtualPosition(params);
+    if (!virtual) return null;
+    const { docText, options, virtualContent, virtualOffset, virtualPath } =
+      virtual;
     const virtualBodyStart = positionToOffset(
       virtualContent,
       PREAMBLE_LINE_COUNT,
@@ -406,23 +386,12 @@ connection.onDefinition(
         continue;
       }
 
-      const fileName = path.isAbsolute(definition.fileName)
-        ? definition.fileName
-        : path.resolve(
-            workspaceRoot ?? process.cwd(),
-            definition.fileName,
-          );
-      const content = ts.sys.readFile(fileName);
-      if (content !== undefined) {
-        locations.push(
-          locationFromOffsets(
-            pathToFileURL(fileName).toString(),
-            content,
-            definition.textSpan.start,
-            definition.textSpan.length,
-          ),
-        );
-      }
+      const location = locationFromFileOffsets(
+        definition.fileName,
+        definition.textSpan.start,
+        definition.textSpan.length,
+      );
+      if (location) locations.push(location);
     }
     if (locations.length > 0) return locations;
 
@@ -437,58 +406,24 @@ connection.onDefinition(
       params.textDocument.uri,
       dataPath,
     )) {
-      const fileName = path.isAbsolute(definition.fileName)
-        ? definition.fileName
-        : path.resolve(
-            workspaceRoot ?? process.cwd(),
-            definition.fileName,
-          );
-      const content = ts.sys.readFile(fileName);
-      if (content !== undefined) {
-        locations.push(
-          locationFromOffsets(
-            pathToFileURL(fileName).toString(),
-            content,
-            definition.start,
-            definition.length,
-          ),
-        );
-      }
+      const location = locationFromFileOffsets(
+        definition.fileName,
+        definition.start,
+        definition.length,
+      );
+      if (location) locations.push(location);
     }
     return locations.length > 0 ? locations : null;
   },
 );
 
 connection.onHover((params: TextDocumentPositionParams): Hover | null => {
-  const doc = documents.get(params.textDocument.uri);
-  if (!doc) return null;
-
-  const docText = doc.getText();
-  if (
-    !isInsideEtaTagInText(
-      docText,
-      params.position.line,
-      params.position.character,
-      getDocumentLanguageOptions(params.textDocument.uri),
-    )
-  ) {
-    return null;
-  }
-
-  const virtualPath = getVirtualPath(params.textDocument.uri);
-  updateVirtualFile(params.textDocument.uri, docText);
-
-  const virtualContent = virtualContents.get(virtualPath) ?? "";
-  const virtualLine = params.position.line + PREAMBLE_LINE_COUNT;
-  const virtualOffset = positionToOffset(
-    virtualContent,
-    virtualLine,
-    params.position.character,
-  );
+  const virtual = getVirtualPosition(params);
+  if (!virtual) return null;
 
   const info = getLanguageService().getQuickInfoAtPosition(
-    virtualPath,
-    virtualOffset,
+    virtual.virtualPath,
+    virtual.virtualOffset,
   );
   if (!info?.displayParts?.length) return null;
 

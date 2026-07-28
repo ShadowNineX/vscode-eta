@@ -2,7 +2,7 @@
   "name": "eta-language-support",
   "displayName": "Eta IntelliSense",
   "description": "Typed IntelliSense, syntax highlighting, autocomplete, and diagnostics for Eta templates",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "ShadowNine",
   "license": "MIT",
   "repository": {
@@ -37,16 +37,15 @@
     "@vitest/coverage-v8": "4.1.6",
     "@vitest/ui": "^4.1.6",
     "eta": "^4.6.0",
-    "tsup": "^8.5.1",
+    "tsdown": "^0.22.14",
     "typescript": "^6.0.3",
     "vitest": "^4.1.6"
   },
   "scripts": {
     "vscode:prepublish": "bun run compile",
-    "compile": "bun run typecheck && tsup",
-    "copy:typescript-libs": "bun scripts/copyTypeScriptLibs.ts",
+    "compile": "bun run typecheck && tsdown",
     "typecheck": "tsc -p ./ --noEmit",
-    "watch": "tsup --watch",
+    "watch": "tsdown --watch",
     "test": "vitest run",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage",

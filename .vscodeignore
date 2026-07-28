@@ -2,6 +2,7 @@
 .vscode-test/**
 .github/**
 .fallow/**
+.fallowrc.json
 .git/**
 .gitignore
 vsc-extension-quickstart.md
@@ -12,7 +13,7 @@ coverage/
 .vitest/
 scripts/
 tsconfig.json
-tsup.config.ts
+tsdown.config.mts
 vitest.config.ts
 src/
 tests/

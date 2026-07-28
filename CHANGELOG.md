@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1
+
+- Migrated extension bundling from tsup to tsdown while preserving CommonJS entry files and packaged TypeScript standard-library declarations.
+- Removed redundant language-server re-exports and consolidated duplicate request-position, source-location, and logger logic.
+- Fixed VS Code language-configuration validation by using the current object form for line comments.
+
 ## 0.2.0
 
 - Added Ctrl-click and Go to Definition for Eta-local variables and inferred render data, including nested properties, arrays, layouts, custom `varName`, and `useWith`.

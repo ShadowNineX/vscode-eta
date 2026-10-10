@@ -131,7 +131,7 @@ function getVirtualPath(uri: string): string {
 }
 function canonicalExistingPath(fileName: string): string {
   try {
-    return fs.realpathSync(fileName);
+    return fs.realpathSync.native(fileName);
   } catch {
     const parent = path.dirname(fileName);
     return parent === fileName ? fileName :
@@ -173,7 +173,7 @@ function getWorkspaceManifestForFile(
 function manifestFileStamp(fileName: string): string {
   try {
     const stat = fs.statSync(fileName, { bigint: true });
-    return `${fs.realpathSync(fileName)}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+    return `${fs.realpathSync.native(fileName)}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
   } catch {
     return "missing";
   }

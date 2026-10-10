@@ -3,6 +3,7 @@
 ## 0.4.0
 
 - Added a flat Eta monogram icon for the VS Code Marketplace and project branding.
+- Fixed manifest building and workspace ownership through Windows short-path aliases.
 - Added a trusted-build manifest builder and CLI for runtime routes, custom loaders, plugins and generated/transformed templates, with hash freshness and validated output.
 - Added bounded imported render wrappers, parameterized factories and paired finite-record inference; replaced missing-evidence `any` with actionable `unknown` diagnostics.
 - Fixed untitled-document activation and stale/nested manifest ownership, including watcher-excluded inputs and transformed syntax outside Eta tags.

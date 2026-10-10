@@ -143,9 +143,9 @@ describe("server entrypoint", () => {
     expect(mocks.documents.onDidClose).toHaveBeenCalledTimes(1);
     const workspaceChange =
       mocks.connection.workspace.onDidChangeWorkspaceFolders.mock.calls[0][0];
-    const workspaceDir = fs.mkdtempSync(
+    const workspaceDir = fs.realpathSync.native(fs.mkdtempSync(
       path.join(os.tmpdir(), "eta-workspace-folder-"),
-    );
+    ));
     const workspaceTemplate = path.join(workspaceDir, "folder.eta");
     const workspaceScript = path.join(workspaceDir, "folder.mts");
     fs.writeFileSync(workspaceTemplate, "");
@@ -236,7 +236,7 @@ describe("server entrypoint", () => {
 
     const renderSource = `const payload = { user: { name: "Ada" } };`;
     const renderSourcePath = path.join(
-      fs.mkdtempSync(path.join(os.tmpdir(), "eta-definition-")),
+      fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "eta-definition-"))),
       "render.ts",
     );
     fs.writeFileSync(renderSourcePath, renderSource);
@@ -324,9 +324,9 @@ describe("server entrypoint", () => {
       ),
     ).toBe(true);
 
-    const navigationDir = fs.mkdtempSync(
+    const navigationDir = fs.realpathSync.native(fs.mkdtempSync(
       path.join(os.tmpdir(), "eta-navigation-"),
-    );
+    ));
     const pagePath = path.join(navigationDir, "page.eta");
     const partialPath = path.join(navigationDir, "partial.eta");
     const pageUri = pathToFileURL(pagePath).toString();
@@ -433,9 +433,9 @@ describe("server entrypoint", () => {
       diagnostics: [],
     });
 
-    const manifestRoot = fs.mkdtempSync(
+    const manifestRoot = fs.realpathSync.native(fs.mkdtempSync(
       path.join(os.tmpdir(), "eta-manifest-server-"),
-    );
+    ));
     const manifestTemplatePath = path.join(manifestRoot, "profile.eta");
     const manifestDataPath = path.join(manifestRoot, "runtime-data.ts");
     const manifestTemplateUri = pathToFileURL(manifestTemplatePath).toString();

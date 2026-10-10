@@ -209,7 +209,7 @@ function assertUniqueStrings(value: unknown, label: string): string[] {
 
 function realWorkspaceRoot(root: string): string {
   try {
-    return fs.realpathSync(root);
+    return fs.realpathSync.native(root);
   } catch {
     invalid(`Workspace root does not exist: ${root}`);
   }
@@ -250,7 +250,7 @@ function resolveContainedPath(
   const candidate = resolveContainedCandidate(root, value, label);
   let resolved: string;
   try {
-    resolved = fs.realpathSync(candidate);
+    resolved = fs.realpathSync.native(candidate);
   } catch {
     stale(`${label} does not exist: ${String(value)}`);
   }
@@ -928,7 +928,7 @@ function observableManifestPath(root: string, value: unknown): string | undefine
     const candidate = resolveContainedCandidate(root, value, "Manifest observation");
     let ancestor = candidate;
     while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
-    return isContained(root, fs.realpathSync(ancestor)) ? candidate : undefined;
+    return isContained(root, fs.realpathSync.native(ancestor)) ? candidate : undefined;
   } catch {
     return undefined;
   }
@@ -956,7 +956,7 @@ export function loadEtaLanguageSupportManifest(root: string): EtaManifestLoadRes
   let observedFiles: string[] = [];
   try {
     const realRoot = realWorkspaceRoot(root);
-    const realManifest = fs.realpathSync(manifestPath);
+    const realManifest = fs.realpathSync.native(manifestPath);
     if (!isContained(realRoot, realManifest)) {
       invalid("Manifest file resolves outside the workspace root");
     }

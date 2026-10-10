@@ -19,7 +19,7 @@ function workspace(): string {
   fs.writeFileSync(path.join(root, "model.ts"), "export interface Card { title: string; tags: string[] }\n");
   fs.writeFileSync(path.join(root, "aliases.ts"), "export { Card as CardAlias } from './model';\n");
   fs.writeFileSync(path.join(root, "tsconfig.json"), "{ \"compilerOptions\": { \"strict\": true } }");
-  return root;
+  return fs.realpathSync.native(root);
 }
 
 afterEach(() => {
@@ -27,6 +27,30 @@ afterEach(() => {
 });
 
 describe("EtaManifestBuilder", () => {
+  it.skipIf(process.platform !== "win32")("builds and loads manifests through Windows short-path aliases", ({ skip }) => {
+    const root = workspace();
+    const shortRoot = execFileSync("powershell.exe", [
+      "-NoProfile", "-NonInteractive", "-Command",
+      "(New-Object -ComObject Scripting.FileSystemObject).GetFolder($env:ETA_TEST_WORKSPACE_ROOT).ShortPath",
+    ], { encoding: "utf8", env: { ...process.env, ETA_TEST_WORKSPACE_ROOT: root } }).trim();
+    if (canonicalTemplatePath(shortRoot) === canonicalTemplatePath(root)) skip();
+    fs.mkdirSync(path.join(root, "node_modules", "local-model"), { recursive: true });
+    fs.writeFileSync(path.join(root, "node_modules", "local-model", "index.d.ts"), "export interface LocalModel { enabled: boolean }\n");
+    fs.writeFileSync(path.join(root, "model.ts"), "import type { LocalModel } from 'local-model'; export interface Card extends LocalModel { title: string }\n");
+    fs.writeFileSync(path.join(root, "tsconfig.json"), '{ "compilerOptions": { "moduleResolution": "node", "ignoreDeprecations": "6.0" } }');
+    const builder = new EtaManifestBuilder({ root: shortRoot });
+    builder.addTemplate({ path: "views/card.eta", dataType: { file: "model.ts", export: "Card" } }).write();
+    expect(builder.root).toBe(root);
+    for (const requestedRoot of [shortRoot, root]) {
+      const loaded = loadEtaLanguageSupportManifest(requestedRoot);
+      expect(loaded.status).toBe("loaded");
+      if (loaded.status === "loaded") {
+        expect(loaded.manifest.templates.get(canonicalTemplatePath(path.join(root, "views", "card.eta")))?.dataType).toContain("title: string");
+        expect(loaded.manifest.templates.get(canonicalTemplatePath(path.join(root, "views", "card.eta")))?.dataType).toContain("enabled: boolean");
+      }
+    }
+  });
+
   it("writes a deterministic validated manifest from physical templates and exported model types", () => {
     const root = workspace();
     const builder = new EtaManifestBuilder({ root, inputs: ["tsconfig.json"] });

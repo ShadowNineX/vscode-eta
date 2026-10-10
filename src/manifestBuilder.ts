@@ -88,7 +88,7 @@ function isWithin(root: string, target: string): boolean {
 
 function existingRealPath(fileName: string, label: string): string {
   try {
-    return fs.realpathSync(fileName);
+    return fs.realpathSync.native(fileName);
   } catch {
     throw new Error(`${label} must exist: ${fileName}`);
   }
@@ -224,7 +224,7 @@ function trackPackageInputs(root: string, from: string, inputs: Map<string, stri
   for (let directory = path.dirname(from); isWithin(root, directory); directory = path.dirname(directory)) {
     for (const name of ["package.json", "package-lock.json", "bun.lock", "pnpm-lock.yaml", "yarn.lock"]) {
       const candidate = path.join(directory, name);
-      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) snapshotInput(inputs, fs.realpathSync(candidate));
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) snapshotInput(inputs, fs.realpathSync.native(candidate));
     }
     if (directory === root) break;
   }
@@ -324,7 +324,7 @@ export class EtaManifestBuilder {
 
   constructor(options: EtaManifestBuilderOptions = {}) {
     const requestedRoot = options.root ?? process.cwd();
-    this.root = fs.realpathSync(requestedRoot);
+    this.root = fs.realpathSync.native(requestedRoot);
     this.output = path.resolve(this.root, options.output ?? ETA_LANGUAGE_SUPPORT_MANIFEST);
     if (!isWithin(this.root, this.output)) throw new Error("Manifest output must be inside the workspace root");
     this.assertSafeOutputTarget(this.output);
@@ -337,7 +337,7 @@ export class EtaManifestBuilder {
     if (!isWithin(this.root, absolute) || !fs.statSync(absolute).isFile()) {
       throw new Error(`Manifest input must be an existing workspace file: ${fileName}`);
     }
-    const realInput = fs.realpathSync(absolute);
+    const realInput = fs.realpathSync.native(absolute);
     if (!isWithin(this.root, realInput)) throw new Error(`Manifest input resolves outside the workspace root: ${fileName}`);
     snapshotInput(this.inputFiles, realInput);
     return this;
@@ -347,11 +347,11 @@ export class EtaManifestBuilder {
     const absolute = path.resolve(this.root, specification.path);
     if (!isWithin(this.root, absolute)) throw new Error("Template path must be inside the workspace root");
     this.assertNotOutputFile(absolute, "a template");
-    if (fs.existsSync(absolute) && !isWithin(this.root, fs.realpathSync(absolute))) {
+    if (fs.existsSync(absolute) && !isWithin(this.root, fs.realpathSync.native(absolute))) {
       throw new Error("Template path resolves outside the workspace root");
     }
     const source = this.readTemplateSource(absolute, specification);
-    const realFile = fs.realpathSync(absolute);
+    const realFile = fs.realpathSync.native(absolute);
     if (!isWithin(this.root, realFile)) throw new Error("Template resolves outside the workspace root");
     this.registerMetadataInputs(specification);
     const dataType = typeof specification.dataType === "string"
@@ -470,8 +470,8 @@ export class EtaManifestBuilder {
   }
 
   private assertNotOutputFile(fileName: string, role: string): void {
-    const output = fs.existsSync(this.output) ? fs.realpathSync(this.output) : this.output;
-    const candidate = fs.existsSync(fileName) ? fs.realpathSync(fileName) : fileName;
+    const output = fs.existsSync(this.output) ? fs.realpathSync.native(this.output) : this.output;
+    const candidate = fs.existsSync(fileName) ? fs.realpathSync.native(fileName) : fileName;
     if (canonical(fileName) === canonical(this.output) || canonical(candidate) === canonical(output)) {
       throw new Error(`Manifest output cannot also be ${role}`);
     }
@@ -480,7 +480,7 @@ export class EtaManifestBuilder {
   private assertSafeGeneratedTarget(target: string): void {
     let ancestor = path.dirname(target);
     while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
-    const realAncestor = fs.realpathSync(ancestor);
+    const realAncestor = fs.realpathSync.native(ancestor);
     if (!isWithin(this.root, realAncestor)) throw new Error("Generated template path resolves outside the workspace root");
     try {
       if (fs.lstatSync(target).isSymbolicLink()) {
@@ -489,7 +489,7 @@ export class EtaManifestBuilder {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    if (fs.existsSync(target) && !isWithin(this.root, fs.realpathSync(target))) {
+    if (fs.existsSync(target) && !isWithin(this.root, fs.realpathSync.native(target))) {
       throw new Error("Generated template path resolves outside the workspace root");
     }
   }
@@ -497,7 +497,7 @@ export class EtaManifestBuilder {
   private assertSafeOutputTarget(target: string): void {
     let ancestor = path.dirname(target);
     while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
-    if (!isWithin(this.root, fs.realpathSync(ancestor))) {
+    if (!isWithin(this.root, fs.realpathSync.native(ancestor))) {
       throw new Error("Manifest output path resolves outside the workspace root");
     }
     try {
@@ -619,7 +619,7 @@ export async function runManifestConfig(fileName: string, root = path.dirname(fi
     throw new Error("Manifest config was already executed in this process; run a fresh `node out/manifest.js generate` process");
   }
   const builder = new EtaManifestBuilder({ root });
-  const realConfig = fs.realpathSync(path.resolve(fileName));
+  const realConfig = fs.realpathSync.native(path.resolve(fileName));
   trackManifestConfigInputs(builder, realConfig);
   hasExecutedManifestConfig = true;
   const module = await import(pathToFileURL(realConfig).href);

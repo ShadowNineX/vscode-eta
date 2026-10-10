@@ -31,7 +31,7 @@ interface TestWorkspace {
 }
 
 function createWorkspace(): TestWorkspace {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "eta-manifest-"));
+  const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "eta-manifest-")));
   roots.push(root);
   fs.mkdirSync(path.join(root, "views"));
   const source = "<%= it.name %>\n";

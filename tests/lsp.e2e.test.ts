@@ -71,7 +71,7 @@ describe("bundled language server", () => {
   let stderr = "";
 
   beforeAll(async () => {
-    workspace = fs.mkdtempSync(path.join(os.tmpdir(), "eta-lsp-e2e-"));
+    workspace = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "eta-lsp-e2e-")));
     workspaceLink = `${workspace}-link`;
     fs.symlinkSync(workspace, workspaceLink, process.platform === "win32" ? "junction" : "dir");
     fs.writeFileSync(

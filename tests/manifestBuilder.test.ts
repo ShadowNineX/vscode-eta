@@ -7,6 +7,7 @@ import { Eta } from "eta";
 import * as ts from "typescript";
 import { EtaManifestBuilder } from "../src/manifestBuilder";
 import { ETA_LANGUAGE_SUPPORT_MANIFEST, loadEtaLanguageSupportManifest, MAX_MANIFEST_BYTES, MAX_MANIFEST_FILES } from "../src/etaManifest";
+import { canonicalTemplatePath } from "../src/templatePaths";
 
 const roots: string[] = [];
 
@@ -151,9 +152,9 @@ describe("EtaManifestBuilder", () => {
   it("tracks in-root declaration dependencies and tsconfig bases, then rejects external model paths", () => {
     const root = workspace();
     fs.mkdirSync(path.join(root, "configs"));
-    fs.writeFileSync(path.join(root, "configs", "base.json"), "{ \"compilerOptions\": { \"strict\": true } }");
+    fs.writeFileSync(path.join(root, "configs", "Base.json"), "{ \"compilerOptions\": { \"strict\": true } }");
     fs.writeFileSync(path.join(root, "configs", "extra.json"), "{ \"compilerOptions\": { \"noUncheckedIndexedAccess\": true } }");
-    fs.writeFileSync(path.join(root, "tsconfig.json"), "{ \"extends\": [\"./configs/base.json\", \"./configs/extra.json\"], \"compilerOptions\": { \"moduleResolution\": \"node\", \"ignoreDeprecations\": \"6.0\" } }");
+    fs.writeFileSync(path.join(root, "tsconfig.json"), "{ \"extends\": [\"./configs/Base.json\", \"./configs/extra.json\"], \"compilerOptions\": { \"moduleResolution\": \"node\", \"ignoreDeprecations\": \"6.0\" } }");
     fs.mkdirSync(path.join(root, "node_modules", "local-model"), { recursive: true });
     fs.writeFileSync(path.join(root, "node_modules", "local-model", "index.d.ts"), "export interface LocalModel { enabled: boolean }\n");
     fs.writeFileSync(path.join(root, "model.ts"), "import type { LocalModel } from 'local-model'; export interface Card extends LocalModel { title: string }\n");
@@ -162,10 +163,10 @@ describe("EtaManifestBuilder", () => {
     const loaded = loadEtaLanguageSupportManifest(root);
     expect(loaded.status).toBe("loaded");
     if (loaded.status === "loaded") {
-      expect([...loaded.manifest.inputs.keys()]).toContain(path.join(root, "configs", "base.json").toLowerCase());
-      expect([...loaded.manifest.inputs.keys()]).toContain(path.join(root, "node_modules", "local-model", "index.d.ts").toLowerCase());
+      expect([...loaded.manifest.inputs.keys()]).toContain(canonicalTemplatePath(path.join(root, "configs", "Base.json")));
+      expect([...loaded.manifest.inputs.keys()]).toContain(canonicalTemplatePath(path.join(root, "node_modules", "local-model", "index.d.ts")));
     }
-    fs.writeFileSync(path.join(root, "configs", "base.json"), "{ \"compilerOptions\": { \"strict\": false } }");
+    fs.writeFileSync(path.join(root, "configs", "Base.json"), "{ \"compilerOptions\": { \"strict\": false } }");
     expect(loadEtaLanguageSupportManifest(root)).toMatchObject({ status: "stale" });
     const external = fs.mkdtempSync(path.join(os.tmpdir(), "eta-external-model-"));
     roots.push(external);

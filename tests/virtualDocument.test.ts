@@ -190,7 +190,7 @@ describe("buildVirtualContent", () => {
 
   it("includes the typed template data parameter in the preamble", () => {
     const vc = buildVirtualContent("");
-    expect(vc).toContain("function __etaTemplate(it: Record<string, any>");
+    expect(vc).toContain("function __etaTemplate(it: Record<string, unknown>");
   });
 
   it("includes all Eta builtin declarations in the preamble", () => {
@@ -317,7 +317,7 @@ describe("PREAMBLE_LINE_COUNT", () => {
 
 describe("DEFAULT_IT_TYPE", () => {
   it("is the fallback type string", () => {
-    expect(DEFAULT_IT_TYPE).toBe("Record<string, any>");
+    expect(DEFAULT_IT_TYPE).toBe("Record<string, unknown>");
   });
 });
 
@@ -346,7 +346,7 @@ describe("buildPreamble", () => {
 
   it("falls back gracefully with DEFAULT_IT_TYPE", () => {
     const p = buildPreamble(DEFAULT_IT_TYPE);
-    expect(p).toContain("function __etaTemplate(it: Record<string, any>");
+    expect(p).toContain("function __etaTemplate(it: Record<string, unknown>");
   });
 
   it("uses only the configured custom varName", () => {
@@ -461,7 +461,7 @@ describe("buildVirtualContent (with itType)", () => {
 
   it("falls back to DEFAULT_IT_TYPE when no itType given", () => {
     const vc = buildVirtualContent("");
-    expect(vc).toContain("function __etaTemplate(it: Record<string, any>");
+    expect(vc).toContain("function __etaTemplate(it: Record<string, unknown>");
   });
 
   it("still has exactly PREAMBLE_LINE_COUNT lines before template content", () => {

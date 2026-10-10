@@ -5,6 +5,7 @@ import * as path from "node:path";
 import {
   ETA_LANGUAGE_SUPPORT_MANIFEST,
   MAX_MANIFEST_BYTES,
+  MAX_MANIFEST_FILES,
   areManifestTemplatesRelated,
   getManifestSymbolAt,
   getManifestTemplate,
@@ -330,6 +331,43 @@ describe("Eta language-support manifest", () => {
     });
   });
 
+  it("observes safe dependencies in stale manifests, including missing inputs", () => {
+    const workspace = createWorkspace();
+    const manifest = createManifest(workspace);
+    const input = path.join(workspace.root, "eta.config.ts");
+    fs.rmSync(input);
+    writeManifest(workspace.root, manifest);
+    expect(loadEtaLanguageSupportManifest(workspace.root)).toMatchObject({
+      status: "stale", observedFiles: expect.arrayContaining([input, workspace.sourcePath]),
+    });
+    fs.writeFileSync(input, "export default {};\n");
+    expect(loadEtaLanguageSupportManifest(workspace.root).status).toBe("loaded");
+  });
+
+  it("bounds filesystem observations before validating oversized file collections", () => {
+    const workspace = createWorkspace();
+    const manifest = createManifest(workspace);
+    manifest.inputs = Array.from({ length: MAX_MANIFEST_FILES }, (_, index) => ({
+      path: `missing-${index}.txt`, sha256: sha256Text(""),
+    }));
+    writeManifest(workspace.root, manifest);
+    expect(loadEtaLanguageSupportManifest(workspace.root)).toMatchObject({
+      status: "invalid", observedFiles: [], messages: [expect.stringContaining("split metadata across application roots")],
+    });
+  });
+
+  it("never observes an invalid manifest path outside the workspace", () => {
+    const workspace = createWorkspace();
+    const manifest = createManifest(workspace);
+    manifest.inputs = [{ path: "../outside.txt", sha256: sha256Text("outside") }];
+    writeManifest(workspace.root, manifest);
+    const result = loadEtaLanguageSupportManifest(workspace.root);
+    expect(result.status).toBe("invalid");
+    if (result.status === "invalid") {
+      expect(result.observedFiles).toEqual([workspace.sourcePath]);
+    }
+  });
+
   it("rejects overlapping mappings and ambiguous symbol ownership", () => {
     const workspace = createWorkspace();
     const manifest = createManifest(workspace);
@@ -371,9 +409,22 @@ describe("Eta language-support manifest", () => {
       templates[0].dataDefinitions as Array<Record<string, unknown>>;
     definitions[0].dataPath = ["node", "node"];
     writeManifest(workspace.root, manifest);
-    expect(loadEtaLanguageSupportManifest(workspace.root)).toMatchObject({
-      status: "loaded",
-    });
+    const result = loadEtaLanguageSupportManifest(workspace.root);
+    if (result.status !== "loaded") throw new Error(result.messages.join("\n"));
+  });
+
+  it("accepts an empty physical template with no source mappings", () => {
+    const workspace = createWorkspace();
+    fs.writeFileSync(workspace.sourcePath, "");
+    const manifest = createManifest(workspace);
+    const templates = manifest.templates as Array<Record<string, unknown>>;
+    templates[0].sha256 = sha256Text("");
+    templates[0].diagnostics = [];
+    (templates[0].virtualDocument as Record<string, unknown>).mappings = [];
+    manifest.symbols = [];
+    writeManifest(workspace.root, manifest);
+    const result = loadEtaLanguageSupportManifest(workspace.root);
+    expect(result.status).toBe("loaded");
   });
 
   it("rejects manifests larger than the hard size limit", () => {

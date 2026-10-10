@@ -4,13 +4,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { DEFAULT_IT_TYPE } from "../src/virtualDocument";
+import { buildVirtualDocument, DEFAULT_IT_TYPE } from "../src/virtualDocument";
 import {
   analyzeEtaTemplateLayouts,
   analyzeFileForEtaCalls,
   analyzeWorkspaceFiles,
   getDataDefinitionsForUri,
   getItTypeForUri,
+  getWorkspaceProjectForFile,
   scanWorkspaceFiles,
   templateDataDefinitionMap,
   templateDataTypeMap,
@@ -20,6 +21,7 @@ import {
   templateResolutionOptionsMap,
   typeToStructuralString,
   workspaceEtaFiles,
+  workspaceProjectConfigFiles,
   workspaceTsFiles,
   workspaceProjects,
 } from "../src/typeInference";
@@ -30,13 +32,16 @@ import {
 function makeTestProgram(
   code: string,
   declarationsComeFromEta = true,
+  fileNameOverride?: string,
 ): {
   checker: ts.TypeChecker;
   sf: ts.SourceFile;
 } {
-  const fileName = declarationsComeFromEta
-    ? path.join(process.cwd(), "node_modules", "eta", "test-fixture.ts")
-    : "eta_test.ts";
+  const fileName =
+    fileNameOverride ??
+    (declarationsComeFromEta
+      ? path.join(process.cwd(), "node_modules", "eta", "test-fixture.ts")
+      : "eta_test.ts");
   const sf = ts.createSourceFile(
     fileName,
     code,
@@ -98,6 +103,28 @@ function getNamedVarType(
   return { checker, type: found };
 }
 
+function getVirtualTemplateSemanticDiagnostics(
+  itType: string,
+  template: string,
+): readonly ts.Diagnostic[] {
+  const fileName = path.join(process.cwd(), "eta-callback-virtual.ts");
+  const content = buildVirtualDocument(template, itType).content;
+  const host = ts.createCompilerHost({ strict: true, noEmit: true }, true);
+  const getSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (candidate, languageVersion) =>
+    path.normalize(candidate) === path.normalize(fileName)
+      ? ts.createSourceFile(candidate, content, languageVersion, true)
+      : getSourceFile(candidate, languageVersion);
+  const program = ts.createProgram({
+    rootNames: [fileName],
+    options: { strict: true, noEmit: true },
+    host,
+  });
+  const sourceFile = program.getSourceFile(fileName);
+  if (!sourceFile) throw new Error("Virtual Eta source file was not created");
+  return program.getSemanticDiagnostics(sourceFile);
+}
+
 // ── typeToStructuralString ───────────────────────────────────────────────────────────
 
 describe("typeToStructuralString", () => {
@@ -154,6 +181,110 @@ describe("typeToStructuralString", () => {
     expect(typeToStructuralString(checker, type)).toBe("Array<string>");
   });
 
+  it("structurally expands named dictionary index signatures", () => {
+    const { checker, type } = getNamedVarType(
+      `interface Dict { readonly [key: string]: { value: number; labels: Array<string> } }
+       declare const x: Dict;`,
+      "x",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(result).toContain("readonly [key: string]");
+    expect(result).toMatch(/value: number/);
+    expect(result).toMatch(/labels: Array<string>/);
+    expect(result).not.toContain("Dict");
+    expect(getVirtualTemplateSemanticDiagnostics(result, "<% it.entry.value.toFixed() %>"))
+      .toEqual([]);
+  });
+
+  it("keeps named properties alongside numeric and symbol index signatures", () => {
+    const { checker, type } = getNamedVarType(
+      `declare const marker: unique symbol;
+       interface Mixed { title: string; [key: number]: { count: number }; readonly [key: symbol]: { enabled: boolean } }
+       declare const x: Mixed;`,
+      "x",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(result).toMatch(/title: string/);
+    expect(result).toMatch(/\[key: number\]: \{ count: number \}/);
+    expect(result).toMatch(/readonly \[key: symbol\]: \{ enabled: boolean \}/);
+    expect(result).not.toContain("Mixed");
+  });
+
+  it("preserves template-literal dictionary key patterns", () => {
+    const { checker, type } = getNamedVarType(
+      "interface Data { [key: `data-${string}`]: number }\ndeclare const x: Data;",
+      "x",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(result).toContain("[key: `data-${string}`]: number");
+    expect(getVirtualTemplateSemanticDiagnostics(result, '<% it["data-total"].toFixed() %>')).toEqual([]);
+    expect(getVirtualTemplateSemanticDiagnostics(result, '<% it["other"] %>')).not.toEqual([]);
+  });
+
+  it("escapes template-literal dictionary text in virtual types", () => {
+    const { checker, type } = getNamedVarType(
+      "interface Data { [key: `data-\\`${string}-\\${literal}`]: number }\ndeclare const x: Data;",
+      "x",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(result).toContain("\\`");
+    expect(result).toContain("\\${literal}");
+    expect(getVirtualTemplateSemanticDiagnostics(result, "")).toEqual([]);
+  });
+
+  it.each([
+    ["direct array", "const x: readonly string[] = [\"a\"];"],
+    ["array alias", "type Names = readonly string[]; declare const x: Names;"],
+    ["generic alias", "type List<T> = ReadonlyArray<T>; declare const x: List<string>;"],
+  ])("preserves %s readonly arrays as immutable virtual types", (_label, source) => {
+    const { checker, type } = getNamedVarType(source, "x");
+    const result = typeToStructuralString(checker, type);
+    expect(result).toBe("ReadonlyArray<string>");
+    expect(getVirtualTemplateSemanticDiagnostics(result, "<% it[0].toUpperCase() %>")).toEqual([]);
+    expect(getVirtualTemplateSemanticDiagnostics(result, '<% it.push("b") %>')).not.toEqual([]);
+  });
+
+  it("preserves readonly object members for virtual-document writes", () => {
+    const { checker, type } = getNamedVarType(
+      `interface Data { readonly id: string; mutable: number }
+       declare const x: Data;`,
+      "x",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(result).toContain("readonly id: string");
+    expect(getVirtualTemplateSemanticDiagnostics(result, "<% it.id = \"changed\" %>"))
+      .not.toEqual([]);
+    expect(getVirtualTemplateSemanticDiagnostics(result, "<% it.mutable = 2 %>"))
+      .toEqual([]);
+  });
+
+  it.each([
+    ["Readonly mapped type", `interface Data { id: string }\ndeclare const x: Readonly<Data>;`],
+    ["const assertion", `const x = { id: "fixed" } as const;`],
+  ])("preserves synthetic readonly members from %s", (_label, source) => {
+    const { checker, type } = getNamedVarType(source, "x");
+    const result = typeToStructuralString(checker, type);
+    expect(result).toMatch(/readonly id: /);
+    expect(getVirtualTemplateSemanticDiagnostics(result, "<% it.id = \"changed\" %>"))
+      .not.toEqual([]);
+  });
+
+  it("preserves readonly, optional and rest tuple elements", () => {
+    const readonly = getNamedVarType("const x = [1, 'label'] as const;", "x");
+    const readonlyType = typeToStructuralString(readonly.checker, readonly.type);
+    expect(readonlyType).toMatch(/^readonly \[/);
+    expect(getVirtualTemplateSemanticDiagnostics(readonlyType, "<% it[0] = 1; %>")).not.toEqual([]);
+
+    const optional = getNamedVarType("declare const x: [string?];", "x");
+    const optionalType = typeToStructuralString(optional.checker, optional.type);
+    expect(getVirtualTemplateSemanticDiagnostics(optionalType, "<% const empty: typeof it = []; %>")).toEqual([]);
+
+    const rest = getNamedVarType("declare const x: [string, ...number[]];", "x");
+    const restType = typeToStructuralString(rest.checker, rest.type);
+    expect(restType).toContain("...Array<number>");
+    expect(getVirtualTemplateSemanticDiagnostics(restType, "<% it[1].toFixed(); %>")).toEqual([]);
+  });
+
   it("handles union types", () => {
     const { checker, type } = getNamedVarType(
       `const x: string | number = "hi";`,
@@ -202,6 +333,156 @@ describe("typeToStructuralString", () => {
     expect(result).toMatch(/stats:.*visits: number/);
     expect(result).toMatch(/stats:.*revenue: number/);
   });
+
+  it("structurally expands callback parameter types for virtual Eta documents", () => {
+    const { checker, type } = getNamedVarType(
+      `interface UsageWindow { percent: number; resetAt: string }
+       const x: { format: (window: UsageWindow | null) => string } = {
+         format: () => "",
+       };`,
+      "x",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(result).toMatch(/format: \(window: (null \| )?\{ percent: number; resetAt: string \}( \| null)?\) => string/);
+    expect(result).not.toContain("UsageWindow");
+  });
+
+  it("keeps callback rest parameters and overloads valid in virtual Eta documents", () => {
+    const { checker, type } = getNamedVarType(
+      `interface CallbackData {
+         join: (...parts: string[]) => string;
+         convert: {
+           (value: string): number;
+           (value: number): string;
+         };
+       }
+       declare const callbackData: CallbackData;`,
+      "callbackData",
+    );
+    const result = typeToStructuralString(checker, type);
+
+    expect(result).toMatch(/\.\.\.parts: Array<string>/);
+    expect(result).toMatch(/value: string/);
+    expect(result).toMatch(/value: number/);
+    expect(getVirtualTemplateSemanticDiagnostics(result, "")).toEqual([]);
+    expect(
+      getVirtualTemplateSemanticDiagnostics(
+        result,
+        `<% const joined: string = it.join("one", "two") %>\n` +
+          `<% const fromText: number = it.convert("text") %>\n` +
+          `<% const fromNumber: string = it.convert(42) %>`,
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps generic callback bounds self-contained in virtual Eta documents", () => {
+    const { checker, type } = getNamedVarType(
+      `interface ImportedModel { name: string }
+       interface GenericCallbackData {
+         identity: <T extends ImportedModel>(value: T) => T;
+       }
+       declare const callbackData: GenericCallbackData;`,
+      "callbackData",
+    );
+    const result = typeToStructuralString(checker, type);
+
+    expect(result).not.toContain("ImportedModel");
+    expect(
+      getVirtualTemplateSemanticDiagnostics(
+        result,
+        `<% const value = it.identity({ name: "Ada", extra: 1 }) %>\n` +
+          `<% value.extra.toFixed() %>`,
+      ),
+    ).toEqual([]);
+  });
+
+  it("keeps class-valued render data self-contained in virtual Eta documents", () => {
+    const { checker, type } = getNamedVarType(
+      `class User {
+         static kind = "user";
+         constructor(public name: string) {}
+         greet() { return this.name; }
+       }
+       const data = { User };`,
+      "data",
+    );
+    const result = typeToStructuralString(checker, type);
+
+    expect(
+      getVirtualTemplateSemanticDiagnostics(
+        result,
+        `<% const user = new it.User("Ada") %>\n` +
+          `<% user.greet().toUpperCase() %>\n` +
+          `<% it.User.kind.toUpperCase() %>`,
+      ),
+    ).toEqual([]);
+  });
+
+  it("omits private and protected class members from render-data types", () => {
+    const { checker, type } = getNamedVarType(
+      `class User {
+         private token = "secret";
+         protected level = 1;
+         constructor(public name: string, private password: string) {}
+         greet() { return this.name; }
+         static publicKind = "user";
+         private static internal = "secret";
+       }
+       const data = { User };`,
+      "data",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(result).toContain("name: string");
+    expect(result).toContain("greet");
+    expect(result).toContain("publicKind: string");
+    expect(result).not.toContain("token");
+    expect(result).not.toContain("level");
+    expect(result).not.toContain("internal");
+  });
+
+  it("omits ECMAScript private fields and preserves getter-only properties", () => {
+    const { checker, type } = getNamedVarType(
+      `class User {
+         #secret = "hidden";
+         get label() { return "visible"; }
+       }
+       const data = { User };`,
+      "data",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(result).not.toContain("secret");
+    expect(result).toContain("readonly label: string");
+  });
+
+  it("keeps getter-setter properties writable", () => {
+    const { checker, type } = getNamedVarType(
+      "class Data { private value = \"x\"; get label() { return this.value; } set label(value: string) { this.value = value; } } const x = new Data();",
+      "x",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(result).not.toContain("readonly label");
+    expect(getVirtualTemplateSemanticDiagnostics(result, '<% it.label = "changed" %>')).toEqual([]);
+  });
+
+  it("keeps private constructor parameters in construct signatures", () => {
+    const { checker, type } = getNamedVarType(
+      "class User { constructor(private secret: string, public name: string) {} } const data = { User };",
+      "data",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(getVirtualTemplateSemanticDiagnostics(result, '<% new it.User("secret", "Ada") %>')).toEqual([]);
+    expect(getVirtualTemplateSemanticDiagnostics(result, '<% new it.User("Ada") %>')).not.toEqual([]);
+  });
+
+  it("does not expose inaccessible class constructors", () => {
+    const { checker, type } = getNamedVarType(
+      "class PrivateUser { private constructor() {} static create() { return {} as PrivateUser; } } const data = { PrivateUser };",
+      "data",
+    );
+    const result = typeToStructuralString(checker, type);
+    expect(getVirtualTemplateSemanticDiagnostics(result, "<% new it.PrivateUser() %>")).not.toEqual([]);
+    expect(getVirtualTemplateSemanticDiagnostics(result, "<% it.PrivateUser.create() %>")).toEqual([]);
+  });
 });
 
 // ── analyzeFileForEtaCalls ────────────────────────────────────────────────────────
@@ -222,6 +503,21 @@ describe("analyzeFileForEtaCalls", () => {
     const result = templateDataTypeMap.get("user");
     expect(result).toMatch(/name: string/);
     expect(result).toMatch(/age: number/);
+  });
+
+  it("does not embed an unbound outer type parameter in render data", () => {
+    const { checker, sf } = makeTestProgram(
+      `declare const eta: { render(name: string, data: unknown): string };
+       function renderProfile<T extends { name: string }>(data: T) {
+         eta.render("generic-profile", data);
+       }`,
+    );
+    analyzeFileForEtaCalls(sf, checker);
+
+    const result = templateDataTypeMap.get("generic-profile");
+    expect(result).toBeDefined();
+    expect(result).not.toMatch(/\bT\b/);
+    expect(getVirtualTemplateSemanticDiagnostics(result!, "<%= it.name %>")).toEqual([]);
   });
 
   it("records source declarations for root and nested render data", () => {
@@ -266,7 +562,6 @@ describe("analyzeFileForEtaCalls", () => {
         `renderFileAsync("views/receipt.eta", { receiptId: "R-1", paid: true });`,
     );
     analyzeFileForEtaCalls(sf, checker);
-
     expect(templateDataTypeMap.get("invoice")).toMatch(/total: number/);
     expect(templateDataTypeMap.get("receipt")).toMatch(/paid: boolean/);
   });
@@ -477,11 +772,28 @@ describe("analyzeFileForEtaCalls", () => {
     expect(templateDataTypeMap.size).toBe(0);
   });
 
-  it("does not record 'any' types", () => {
+  it.each([
+    ["assertion", `render("user", {} as any);`, "any"],
+    ["variable annotation", `declare const data: any; render("user", data);`, "any"],
+    ["parameter annotation", `function send(data: any) { render("user", data); }`, "any"],
+    ["type alias", `type ViewData = any; declare const data: ViewData; render("user", data);`, "any"],
+    ["return signature", `declare function loadData(): any; render("user", loadData());`, "any"],
+    ["unknown annotation", `declare const data: unknown; render("user", data);`, "unknown"],
+  ])("preserves explicit top-level %s evidence", (_label, usage, expected) => {
     const { checker, sf } = makeTestProgram(
       `declare function render(t: string, d: any): string;\n` +
-        `declare const data: any;\n` +
-        `render("user", data);`,
+        usage,
+    );
+    analyzeFileForEtaCalls(sf, checker);
+    expect(templateDataTypeMap.get("user")).toBe(expected);
+  });
+
+  it.each([
+    `render("user", missingData);`,
+    `type Missing = import("./does-not-exist").Data; declare const data: Missing; render("user", data);`,
+  ])("does not treat checker error-any as application type evidence", (usage) => {
+    const { checker, sf } = makeTestProgram(
+      `declare function render(t: string, d: any): string;\n` + usage,
     );
     analyzeFileForEtaCalls(sf, checker);
     expect(templateDataTypeMap.has("user")).toBe(false);
@@ -573,6 +885,64 @@ describe("analyzeFileForEtaCalls", () => {
     );
     analyzeFileForEtaCalls(sf, checker);
     expect(templateDataTypeMap.size).toBe(0);
+  });
+
+  it("does not treat a locally shadowed CommonJS render parameter as Eta", () => {
+    const { checker, sf } = makeTestProgram(
+      `function invoke(render: (name: string, data: unknown) => string) {
+         render("shadowed-render", { shouldNotAppear: true });
+       }`,
+      false,
+      path.join(process.cwd(), "shadowed-render.cjs.ts"),
+    );
+    analyzeFileForEtaCalls(sf, checker);
+    expect(templateDataTypeMap.has("shadowed-render")).toBe(false);
+  });
+
+  it("recognizes proven CommonJS Eta bindings without accepting shadowed require", () => {
+    const { checker, sf } = makeTestProgram(
+      `declare function require(id: string): {
+         Eta: new () => { render(name: string, data: unknown): string };
+         render(name: string, data: unknown): string;
+       };
+       const { render: etaRender } = require("eta");
+       const EtaClass = require("eta").Eta;
+       const eta = new EtaClass();
+       const legacy = require("eta");
+       etaRender("destructured", { fromDestructure: true });
+       eta.render("class-instance", { fromClass: true });
+       legacy.render("legacy-namespace", { fromNamespace: true });
+       function unrelated(require: (name: string) => { render(name: string, data: unknown): string }) {
+         require("eta").render("shadowed", { shouldNotAppear: true });
+       }`,
+      false,
+      path.join(process.cwd(), "cjs-test.ts"),
+    );
+    analyzeFileForEtaCalls(sf, checker);
+
+    expect(templateDataTypeMap.get("destructured")).toMatch(/fromDestructure: boolean/);
+    expect(templateDataTypeMap.get("class-instance")).toMatch(/fromClass: boolean/);
+    expect(templateDataTypeMap.get("legacy-namespace")).toMatch(/fromNamespace: boolean/);
+    expect(templateDataTypeMap.has("shadowed")).toBe(false);
+  });
+
+  it("maps renderString only when Node fs statically reads an Eta file", () => {
+    const { checker, sf } = makeTestProgram(
+      `import { readFileSync } from "node:fs";
+       declare class Eta { renderString(source: string, data: unknown): string }
+       const eta = new Eta();
+       const template = readFileSync(new URL("./views/profile.eta", import.meta.url), "utf8");
+       eta.renderString(template, { name: "Ada" });
+       eta.renderString("<%= it.inline %>", { inline: true });
+       declare const unrelatedRead: (name: string) => string;
+       eta.renderString(unrelatedRead("./views/unrelated.eta"), { unrelated: true });`,
+    );
+    analyzeFileForEtaCalls(sf, checker);
+
+    const profile = templateDataTypeMap.get("profile");
+    expect(profile).toMatch(/name: string/);
+    expect([...templateDataTypeMap.keys()].some((key) => key.includes("inline"))).toBe(false);
+    expect([...templateDataTypeMap.keys()].some((key) => key.includes("unrelated"))).toBe(false);
   });
 
   it("keeps same-basename templates isolated by resolved views path", () => {
@@ -762,6 +1132,7 @@ describe("scanWorkspaceFiles", () => {
     workspaceTsFiles.clear();
     workspaceEtaFiles.clear();
     workspaceProjects.length = 0;
+    workspaceProjectConfigFiles.clear();
     templateDataTypeMap.clear();
     templateDataDefinitionMap.clear();
     templateLanguageOptionsMap.clear();
@@ -918,6 +1289,82 @@ describe("scanWorkspaceFiles", () => {
       expect(inferredType).not.toBe(DEFAULT_IT_TYPE);
       expect(inferredType).toMatch(/visits: number/);
       expect(inferredType).toMatch(/conversionRate: number/);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("discovers nested and referenced named configs without letting a parent project own child sources", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "eta-project-graph-"));
+    try {
+      const admin = path.join(root, "packages", "admin");
+      const storefront = path.join(root, "packages", "storefront");
+      fs.mkdirSync(path.join(admin, "src"), { recursive: true });
+      fs.mkdirSync(path.join(storefront, "src"), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, "tsconfig.base.json"),
+        JSON.stringify({ compilerOptions: { strict: true, baseUrl: "." } }),
+      );
+      fs.writeFileSync(
+        path.join(root, "tsconfig.json"),
+        JSON.stringify({
+          files: [],
+          references: [
+            { path: "./packages/admin/tsconfig.app.json" },
+            { path: "./packages/storefront/tsconfig.web.json" },
+          ],
+        }),
+      );
+      for (const [directory, configName, property] of [
+        [admin, "tsconfig.app.json", "adminOnly"],
+        [storefront, "tsconfig.web.json", "storefrontOnly"],
+      ] as const) {
+        fs.writeFileSync(
+          path.join(directory, configName),
+          JSON.stringify({
+            extends: "../../tsconfig.base.json",
+            compilerOptions: { module: "esnext", moduleResolution: "bundler" },
+            include: ["src/**/*.ts"],
+          }),
+        );
+        fs.writeFileSync(
+          path.join(directory, "src", "render.ts"),
+          `import { Eta } from "eta";\nconst eta = new Eta({ views: __dirname });\neta.render("shared", { ${property}: true });\n`,
+        );
+        fs.writeFileSync(path.join(directory, "src", "shared.eta"), "<%= it %>");
+      }
+
+      scanWorkspaceFiles(root);
+      const adminSource = path.join(admin, "src", "render.ts");
+      const adminProject = getWorkspaceProjectForFile(adminSource);
+      expect(adminProject?.configFileName).toBe(
+        path
+          .resolve(path.join(admin, "tsconfig.app.json"))
+          .replaceAll("\\", "/"),
+      );
+      expect(
+        [...workspaceProjectConfigFiles].some(
+          (fileName) =>
+            fileName.replaceAll("\\", "/").toLowerCase() ===
+            path
+              .resolve(path.join(root, "tsconfig.base.json"))
+              .replaceAll("\\", "/")
+              .toLowerCase(),
+        ),
+      ).toBe(true);
+      expect(workspaceProjects).toHaveLength(4);
+
+      analyzeWorkspaceFiles([...workspaceTsFiles], {}, workspaceProjects);
+      const adminType = getItTypeForUri(
+        pathToFileURL(path.join(admin, "src", "shared.eta")).toString(),
+      );
+      const storefrontType = getItTypeForUri(
+        pathToFileURL(path.join(storefront, "src", "shared.eta")).toString(),
+      );
+      expect(adminType).toMatch(/adminOnly: boolean/);
+      expect(adminType).not.toContain("storefrontOnly");
+      expect(storefrontType).toMatch(/storefrontOnly: boolean/);
+      expect(storefrontType).not.toContain("adminOnly");
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

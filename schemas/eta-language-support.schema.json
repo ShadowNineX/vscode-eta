@@ -21,12 +21,16 @@
     },
     "inputs": {
       "type": "array",
+      "maxItems": 1024,
+      "description": "Inputs and templates together must contain at most 1024 entries. Split larger metadata across application roots.",
       "items": {
         "$ref": "#/$defs/input"
       }
     },
     "templates": {
       "type": "array",
+      "maxItems": 1024,
+      "description": "Inputs and templates together must contain at most 1024 entries.",
       "items": {
         "$ref": "#/$defs/template"
       }
@@ -405,12 +409,10 @@
           "properties": {
             "content": {
               "type": "string",
-              "minLength": 1,
               "maxLength": 2097152
             },
             "mappings": {
               "type": "array",
-              "minItems": 1,
               "items": {
                 "$ref": "#/$defs/mapping"
               }

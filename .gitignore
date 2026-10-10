@@ -4,6 +4,7 @@ node_modules
 out/
 dist/
 *.js
+!tests/vscode/suite/*.js
 !snippets/
 coverage/
 .vitest/

@@ -97,6 +97,8 @@ vi.mock("vscode-languageserver-textdocument", () => ({
   TextDocument: { create: vi.fn() },
 }));
 
+vi.mock("node:fs", { spy: true });
+
 describe("server entrypoint", () => {
   it("registers LSP handlers and starts listening", async () => {
     // Import after Vitest installs mocks because the entrypoint registers on load.
@@ -554,6 +556,24 @@ describe("server entrypoint", () => {
     mocks.documents.onDidOpen.mock.calls[0][0]({
       document: manifestDocument,
     });
+
+    const manifestStatSpy = vi.mocked(fs.statSync);
+    try {
+      for (let request = 0; request < 2; request++) {
+        manifestStatSpy.mockClear();
+        hover({
+          textDocument: { uri: manifestTemplateUri },
+          position: { line: 0, character: runtimeReferenceStart + 1 },
+        });
+        const observed = manifestStatSpy.mock.calls.filter(([, options]) =>
+          options && typeof options === "object" && "bigint" in options && options.bigint,
+        ).map(([fileName]) => String(fileName));
+        expect(observed.length).toBeGreaterThanOrEqual(3);
+        expect(observed.length).toBe(new Set(observed).size);
+      }
+    } finally {
+      manifestStatSpy.mockClear();
+    }
 
     const manifestDefinition =
       mocks.connection.onDefinition.mock.calls[0][0]({

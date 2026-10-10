@@ -4,10 +4,11 @@ export default defineConfig({
   entry: {
     extension: "src/extension.ts",
     server: "src/server.ts",
+    manifest: "src/manifest.ts",
   },
   outDir: "out",
   clean: true,
-  dts: false,
+  dts: true,
   format: "cjs",
   fixedExtension: false,
   minify: true,

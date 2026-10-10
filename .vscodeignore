@@ -26,6 +26,7 @@ demo/
 **/*.map
 **/*.d.ts
 !out/lib*.d.ts
+!out/manifest.d.ts
 out/*.test.js
 out/*.test.js.map
 out/*.test.d.ts

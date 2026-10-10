@@ -9,7 +9,7 @@ import {
   EtaLanguageOptions,
 } from "./etaConfig";
 
-export const DEFAULT_IT_TYPE = "Record<string, any>";
+export const DEFAULT_IT_TYPE = "Record<string, unknown>";
 
 /** Eta built-in function declarations (8 lines). */
 function buildEtaBuiltins(options: EtaLanguageOptions): string {

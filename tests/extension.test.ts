@@ -89,7 +89,10 @@ describe("production extension activation", () => {
       debug: { module: serverModule, transport: "ipc" },
     });
     expect(clientOptions).toMatchObject({
-      documentSelector: [{ scheme: "file", language: "eta" }],
+      documentSelector: [
+        { scheme: "file", language: "eta" },
+        { scheme: "untitled", language: "eta" },
+      ],
       initializationOptions: {
         etaLanguageOptions: {
           tags: ["{{", "}}"],
@@ -110,10 +113,7 @@ describe("production extension activation", () => {
       synchronize: { configurationSection: "eta" },
     });
     expect(mocks.createFileSystemWatcher).toHaveBeenCalledWith(
-      "**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,eta}",
-    );
-    expect(mocks.createFileSystemWatcher).toHaveBeenCalledWith(
-      "**/{tsconfig.json,jsconfig.json,.eta-language-support.json}",
+      "**/*",
     );
     expect(mocks.registerCompletionItemProvider).not.toHaveBeenCalled();
     expect(mocks.registerHoverProvider).not.toHaveBeenCalled();

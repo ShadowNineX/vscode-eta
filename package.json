@@ -2,6 +2,7 @@
   "name": "eta-language-support",
   "displayName": "Eta IntelliSense",
   "description": "Typed IntelliSense, syntax highlighting, autocomplete, and diagnostics for Eta templates",
+  "icon": "assets/icon.png",
   "version": "0.3.0",
   "publisher": "ShadowNine",
   "license": "MIT",
@@ -29,16 +30,16 @@
   ],
   "main": "./out/extension.js",
   "devDependencies": {
-    "@types/node": "^25.8.0",
-    "@types/vscode": "^1.120.0",
-    "@vitest/coverage-v8": "4.1.6",
-    "@vitest/ui": "^4.1.6",
+    "@types/node": "^26.6.5",
+    "@types/vscode": "1.120.0",
+    "@vitest/coverage-v8": "5.0.3",
+    "@vitest/ui": "5.0.3",
     "@vscode/test-electron": "^3.1.0",
     "eta": "^4.6.0",
-    "tsdown": "^0.22.14",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.6",
-    "vscode-jsonrpc": "^9.0.1",
+    "tsdown": "^0.23.0",
+    "typescript": "6.0.3",
+    "vitest": "5.0.3",
+    "vscode-jsonrpc": "^9.0.3",
     "vscode-oniguruma": "^2.0.1",
     "vscode-textmate": "^9.3.2"
   },
@@ -49,7 +50,7 @@
     "watch": "tsdown --watch",
     "test": "vitest run",
     "test:ui": "vitest --ui",
-    "test:coverage": "vitest --coverage",
+    "test:coverage": "bun run compile && vitest run --coverage",
     "test:vscode": "bun run compile && bun scripts/runVscodeTests.ts",
     "pretest": "bun run compile"
   },
@@ -236,8 +237,8 @@
     }
   },
   "dependencies": {
-    "vscode-languageclient": "^9.0.1",
-    "vscode-languageserver": "^9.0.1",
-    "vscode-languageserver-textdocument": "^1.0.12"
+    "vscode-languageclient": "^10.1.2",
+    "vscode-languageserver": "^10.1.2",
+    "vscode-languageserver-textdocument": "^1.0.15"
   }
 }

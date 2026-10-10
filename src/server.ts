@@ -15,9 +15,11 @@ import {
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import ts from "typescript";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  DEFAULT_IT_TYPE,
   buildRuntimeVirtualDocument,
   buildVirtualDocument,
 } from "./virtualDocument";
@@ -58,6 +60,7 @@ import {
   type StringCallContext,
 } from "./templateContext";
 import {
+  canonicalTemplatePath,
   findMostSpecificContainingRoot,
   isFileWithinRoot,
   resolveTemplatePath,
@@ -68,17 +71,20 @@ import {
   getDataDefinitionsForUri,
   getEtaLanguageOptionsForUri,
   getItTypeForUri,
+  hasInferredItTypeForUri,
   getTemplateResolutionOptionsForUri,
   getWorkspaceProjectForFile,
   scanWorkspaceFiles,
   templateDataDefinitionMap,
   templateRegistrationMap,
   templateDataTypeMap,
+  templateWorkspaceProjectMap,
   templateLanguageOptionsMap,
   templateRelationshipMap,
   templateResolutionOptionsMap,
   workspaceEtaFiles,
   workspaceProjects,
+  workspaceProjectConfigFiles,
   workspaceTsFiles,
   WORKSPACE_SCRIPT_EXTENSIONS,
   type WorkspaceProject,
@@ -94,6 +100,9 @@ const virtualContents = new Map<string, string>(); // virtualPath -> content
 const uriToVirtualPath = new Map<string, string>(); // uri -> virtualPath
 const virtualDocuments = new Map<string, EtaManifestVirtualDocument>();
 const workspaceManifests = new Map<string, EtaLanguageSupportManifest>();
+const workspaceManifestProblems = new Map<string, string>();
+const workspaceManifestStamps = new Map<string, Map<string, string>>();
+const checkedManifestRoots = new Set<string>();
 const manifestTemplateCache = new Map<
   string,
   {
@@ -122,19 +131,52 @@ function getVirtualPath(uri: string): string {
 }
 function canonicalExistingPath(fileName: string): string {
   try {
-    return ts.sys.realpath?.(fileName) ?? fileName;
+    return fs.realpathSync(fileName);
   } catch {
-    return fileName;
+    const parent = path.dirname(fileName);
+    return parent === fileName ? fileName :
+      path.join(canonicalExistingPath(parent), path.basename(fileName));
   }
+}
+
+function getInferenceUri(uri: string): string {
+  const localFile = localWorkspaceFolder(uri);
+  return localFile ? pathToFileURL(canonicalExistingPath(localFile)).toString() : uri;
+}
+
+function getWorkspaceManifestRoot(fileName: string): string | undefined {
+  const candidates = [...workspaceManifestStamps.keys()].map((root) => ({ root }));
+  return findMostSpecificContainingRoot(canonicalExistingPath(fileName), candidates)?.root;
 }
 
 function getWorkspaceManifestForFile(
   fileName: string,
 ): EtaLanguageSupportManifest | undefined {
-  return findMostSpecificContainingRoot(
-    canonicalExistingPath(fileName),
-    workspaceManifests.values(),
-  );
+  const root = getWorkspaceManifestRoot(fileName);
+  if (!root) return undefined;
+  if (checkedManifestRoots.has(root)) return workspaceManifests.get(root);
+  checkedManifestRoots.add(root);
+  const stamps = workspaceManifestStamps.get(root);
+  if (stamps && [...stamps].some(([input, stamp]) => manifestFileStamp(input) !== stamp)) {
+    // Recursive VS Code watchers may exclude declared inputs. Recheck their
+    // filesystem identity before serving authoritative build metadata.
+    reloadWorkspaceManifests();
+    virtualDocuments.clear();
+    virtualContents.clear();
+    serviceVersion++;
+  }
+  // A stale/invalid nested manifest still owns its boundary; parent metadata
+  // must never override it or hide its regeneration diagnostic.
+  return workspaceManifests.get(root);
+}
+
+function manifestFileStamp(fileName: string): string {
+  try {
+    const stat = fs.statSync(fileName, { bigint: true });
+    return `${fs.realpathSync(fileName)}:${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`;
+  } catch {
+    return "missing";
+  }
 }
 
 function getFreshManifestForUri(
@@ -215,17 +257,49 @@ function getFreshManifestTemplate(
   }
 }
 
+function getWorkspaceManifestRoots(): Set<string> {
+  const roots = new Set(workspaceRoots.map((root) => path.resolve(root)));
+  for (const fileName of [...workspaceEtaFiles, ...workspaceProjectConfigFiles]) {
+    const workspace = findMostSpecificContainingRoot(fileName, workspaceRoots.map((root) => ({ root })));
+    if (!workspace) continue;
+    let directory = path.dirname(fileName);
+    while (isFileWithinRoot(directory, workspace.root)) {
+      if (ts.sys.fileExists(path.join(directory, ETA_LANGUAGE_SUPPORT_MANIFEST))) roots.add(directory);
+      const parent = path.dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  return roots;
+}
+
+function observeManifestFiles(stamps: Map<string, string>, files: Iterable<string>): void {
+  for (const input of files) stamps.set(input, manifestFileStamp(input));
+}
+
 function reloadWorkspaceManifests(): void {
+  const previousStamps = new Map(workspaceManifestStamps);
   manifestTemplateCache.clear();
   workspaceManifests.clear();
-  for (const root of workspaceRoots) {
+  workspaceManifestProblems.clear();
+  workspaceManifestStamps.clear();
+  for (const root of getWorkspaceManifestRoots()) {
     const result = loadEtaLanguageSupportManifest(root);
+    const stamps = new Map([[path.join(root, ETA_LANGUAGE_SUPPORT_MANIFEST), manifestFileStamp(path.join(root, ETA_LANGUAGE_SUPPORT_MANIFEST))]]);
+    workspaceManifestStamps.set(root, stamps);
+    if (result.status !== "missing") observeManifestFiles(stamps, result.observedFiles ?? []);
     if (result.status === "loaded") {
-      workspaceManifests.set(result.manifest.root, result.manifest);
+      observeManifestFiles(stamps, result.manifest.inputs.keys());
+      observeManifestFiles(stamps, result.manifest.templates.keys());
+      workspaceManifests.set(root, result.manifest);
       analysisLog.info(
         `Loaded ${ETA_LANGUAGE_SUPPORT_MANIFEST} (${result.manifest.templates.size} templates)`,
       );
     } else if (result.status !== "missing") {
+      // Keep observing previously validated dependencies so restoring an input
+      // can recover the same manifest even when the watcher excludes that file.
+      observeManifestFiles(stamps, previousStamps.get(root)?.keys() ?? []);
+      workspaceManifestProblems.set(root, result.messages.join("; "));
       for (const message of result.messages) {
         analysisLog.warn(`${ETA_LANGUAGE_SUPPORT_MANIFEST}: ${message}`);
       }
@@ -237,6 +311,7 @@ function refreshWorkspaceFiles(): void {
   workspaceTsFiles.clear();
   workspaceEtaFiles.clear();
   workspaceProjects.length = 0;
+  workspaceProjectConfigFiles.clear();
   workspaceRoot = workspaceRoots[0];
   for (const root of workspaceRoots) scanWorkspaceFiles(root);
   activeWorkspaceProject = undefined;
@@ -251,6 +326,7 @@ function ensureWorkspaceAnalyzed(): void {
 }
 
 function runWorkspaceAnalysis(): void {
+  templateWorkspaceProjectMap.clear();
   templateDataTypeMap.clear();
   templateRegistrationMap.clear();
   templateDataDefinitionMap.clear();
@@ -298,7 +374,7 @@ function getDocumentLanguageOptions(uri: string): EtaLanguageOptions {
   const manifestOptions = getFreshManifestTemplate(uri)?.options;
   if (manifestOptions) return manifestOptions;
   const inferredOptions =
-    getEtaLanguageOptionsForUri(uri) ?? DEFAULT_ETA_LANGUAGE_OPTIONS;
+    getEtaLanguageOptionsForUri(getInferenceUri(uri)) ?? DEFAULT_ETA_LANGUAGE_OPTIONS;
   return applyNonDefaultEtaLanguageOptions(
     inferredOptions,
     etaLanguageOptions,
@@ -308,7 +384,7 @@ function getDocumentLanguageOptions(uri: string): EtaLanguageOptions {
 function getDocumentResolutionOptions(uri: string) {
   return (
     getFreshManifestTemplate(uri)?.resolution ??
-    getTemplateResolutionOptionsForUri(uri)
+    getTemplateResolutionOptionsForUri(getInferenceUri(uri))
   );
 }
 
@@ -331,8 +407,8 @@ function isWorkspaceSourceFile(fsPath: string): boolean {
 function isWorkspaceConfigFile(fsPath: string): boolean {
   const basename = path.basename(fsPath).toLowerCase();
   return (
-    basename === "tsconfig.json" ||
-    basename === "jsconfig.json" ||
+    /^(?:ts|js)config(?:\..+)?\.json$/.test(basename) ||
+    basename === "package.json" ||
     basename === ETA_LANGUAGE_SUPPORT_MANIFEST
   );
 }
@@ -345,10 +421,21 @@ function getLanguageService(): ts.LanguageService {
   if (languageService) return languageService;
 
   const host: ts.LanguageServiceHost = {
-    getScriptFileNames: () => [
-      ...Array.from(virtualContents.keys()),
-      ...Array.from(workspaceTsFiles),
-    ],
+    getScriptFileNames: () => {
+      if (!activeWorkspaceProject) return [...virtualContents.keys(), ...workspaceTsFiles];
+      const project = activeWorkspaceProject;
+      const virtualFiles = [...uriToVirtualPath].filter(([uri]) => {
+        try {
+          return getWorkspaceProjectForFile(canonicalExistingPath(fileURLToPath(uri))) === project;
+        } catch {
+          return true;
+        }
+      }).map(([, virtualPath]) => virtualPath);
+      const sourceFiles = workspaceProjects.includes(project)
+        ? project.rootNames.filter((fileName) => getWorkspaceProjectForFile(fileName) === project)
+        : project.rootNames;
+      return [...virtualFiles, ...sourceFiles];
+    },
     getScriptVersion: () => String(serviceVersion),
     getScriptSnapshot: (fileName) => {
       const content = virtualContents.get(fileName);
@@ -384,7 +471,7 @@ function getLanguageService(): ts.LanguageService {
 }
 function activateWorkspaceProject(uri: string): void {
   try {
-    const project = getWorkspaceProjectForFile(fileURLToPath(uri));
+    const project = getWorkspaceProjectForFile(canonicalExistingPath(fileURLToPath(uri)));
     if (project === activeWorkspaceProject) return;
     activeWorkspaceProject = project;
     languageService?.dispose();
@@ -397,7 +484,7 @@ function activateWorkspaceProject(uri: string): void {
 function updateVirtualFile(uri: string, etaSource: string): void {
   const virtualPath = getVirtualPath(uri);
   const manifestTemplate = getFreshManifestTemplate(uri, etaSource);
-  const itType = getItTypeForUri(uri);
+  const itType = getItTypeForUri(getInferenceUri(uri));
   const options = manifestTemplate?.options ?? getDocumentLanguageOptions(uri);
   let virtualDocument: EtaManifestVirtualDocument;
   if (manifestTemplate) {
@@ -442,18 +529,46 @@ function updateVirtualFile(uri: string, etaSource: string): void {
   }
 }
 
+function localWorkspaceFolder(uri: string): string | undefined {
+  try {
+    return fileURLToPath(uri);
+  } catch {
+    return undefined;
+  }
+}
+
+function getInitializationRoots(params: InitializeParams): string[] {
+  const roots = (params.workspaceFolders ?? [])
+    .map((folder) => localWorkspaceFolder(folder.uri))
+    .filter((root): root is string => root !== undefined);
+  if (roots.length > 0) return normalizeWorkspaceRoots(roots);
+
+  // Older clients still send the legacy initialization fields. Keep this
+  // compatibility boundary separate from the modern workspace-folder API.
+  const legacy = params as { rootUri?: string | null; rootPath?: string | null };
+  if (legacy.rootUri) {
+    const root = localWorkspaceFolder(legacy.rootUri);
+    return root ? normalizeWorkspaceRoots([root]) : [];
+  }
+  return legacy.rootPath ? normalizeWorkspaceRoots([path.resolve(legacy.rootPath)]) : [];
+}
+
+function normalizeWorkspaceRoots(roots: readonly string[]): string[] {
+  const unique = new Map<string, string>();
+  for (const root of roots) {
+    const real = canonicalExistingPath(path.resolve(root));
+    unique.set(canonicalTemplatePath(real), real);
+  }
+  return [...unique.values()];
+}
+
 connection.onInitialize((params: InitializeParams): InitializeResult => {
+  checkedManifestRoots.clear();
   etaLanguageOptions = normalizeEtaLanguageOptions(
     params.initializationOptions?.etaLanguageOptions,
   );
-  workspaceRoots.length = 0;
-  for (const rootUri of params.workspaceFolders?.map((folder) => folder.uri) ?? []) {
-    try {
-      workspaceRoots.push(fileURLToPath(rootUri));
-    } catch {
-      // Ignore workspace folders whose URI cannot be resolved locally.
-    }
-  }
+  workspaceRoots.splice(0, workspaceRoots.length, ...getInitializationRoots(params));
+  workspaceAnalyzed = false;
   refreshWorkspaceFiles();
   return {
     capabilities: {
@@ -485,12 +600,13 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
 });
 connection.onInitialized?.(() => {
   connection.workspace.onDidChangeWorkspaceFolders((event) => {
+    checkedManifestRoots.clear();
     let changed = false;
     for (const removed of event.removed) {
       try {
-        const root = fileURLToPath(removed.uri);
+        const root = canonicalExistingPath(fileURLToPath(removed.uri));
         const index = workspaceRoots.findIndex(
-          (candidate) => path.resolve(candidate) === path.resolve(root),
+          (candidate) => canonicalTemplatePath(candidate) === canonicalTemplatePath(root),
         );
         if (index >= 0) {
           workspaceRoots.splice(index, 1);
@@ -502,8 +618,8 @@ connection.onInitialized?.(() => {
     }
     for (const added of event.added) {
       try {
-        const root = fileURLToPath(added.uri);
-        if (!workspaceRoots.some((candidate) => path.resolve(candidate) === path.resolve(root))) {
+        const root = canonicalExistingPath(fileURLToPath(added.uri));
+        if (!workspaceRoots.some((candidate) => canonicalTemplatePath(candidate) === canonicalTemplatePath(root))) {
           workspaceRoots.push(root);
           changed = true;
         }
@@ -520,6 +636,7 @@ connection.onInitialized?.(() => {
 });
 
 connection.onDidChangeConfiguration?.((change) => {
+  checkedManifestRoots.clear();
   etaLanguageOptions = normalizeEtaLanguageOptions(
     change.settings?.etaLanguageOptions ?? change.settings?.eta,
   );
@@ -528,6 +645,7 @@ connection.onDidChangeConfiguration?.((change) => {
 });
 
 documents.onDidOpen((event) => {
+  checkedManifestRoots.clear();
   try {
     documentLog.debug(
       `Opened ${path.basename(fileURLToPath(event.document.uri))}`,
@@ -541,6 +659,7 @@ documents.onDidOpen((event) => {
 });
 
 documents.onDidChangeContent((change) => {
+  checkedManifestRoots.clear();
   updateVirtualFile(change.document.uri, change.document.getText());
   publishDiagnostics(change.document.uri);
 });
@@ -553,33 +672,67 @@ documents.onDidClose?.((event) => {
     uriToVirtualPath.delete(event.document.uri);
     serviceVersion++;
   }
-  connection.sendDiagnostics({ uri: event.document.uri, diagnostics: [] });
+  void connection.sendDiagnostics({ uri: event.document.uri, diagnostics: [] });
 });
 
+const IGNORED_WORKSPACE_DIRECTORIES = new Set([
+  "node_modules", ".git", "out", "dist", "build",
+  ".vscode-test", "coverage", ".vitest",
+]);
+
+function getWatchedWorkspaceFile(uri: string): string | undefined {
+  const localFile = localWorkspaceFolder(uri);
+  if (!localFile) return undefined;
+  const fsPath = canonicalExistingPath(localFile);
+  const containingRoot = findMostSpecificContainingRoot(
+    fsPath,
+    workspaceRoots.map((root) => ({ root })),
+  );
+  if (!containingRoot) return undefined;
+  const canonical = canonicalTemplatePath(canonicalExistingPath(fsPath));
+  if ([...workspaceManifests.values()].some((manifest) => manifest.inputs.has(canonical))) return fsPath;
+  const parts = path.relative(containingRoot.root, fsPath).split(path.sep);
+  return parts.some((part) => IGNORED_WORKSPACE_DIRECTORIES.has(part))
+    ? undefined
+    : fsPath;
+}
+
+function updateWatchedSourceFile(fsPath: string, type: FileChangeType): boolean {
+  if (type === FileChangeType.Deleted) {
+    const wasSource = workspaceTsFiles.delete(fsPath);
+    const wasTemplate = workspaceEtaFiles.delete(fsPath);
+    return wasSource || wasTemplate || isWorkspaceSourceFile(fsPath) || isEtaTemplateFile(fsPath);
+  }
+  if (isWorkspaceSourceFile(fsPath)) {
+    workspaceTsFiles.add(fsPath);
+    return true;
+  }
+  if (isEtaTemplateFile(fsPath)) {
+    workspaceEtaFiles.add(fsPath);
+    return true;
+  }
+  return false;
+}
+
 connection.onDidChangeWatchedFiles((params) => {
+  checkedManifestRoots.clear();
   let needsReanalysis = false;
   let configChanged = false;
   for (const change of params.changes) {
-    try {
-      const fsPath = fileURLToPath(change.uri);
-      if (isWorkspaceConfigFile(fsPath)) {
-        configChanged = true;
-        needsReanalysis = true;
-        continue;
-      }
-      if (change.type === FileChangeType.Deleted) {
-        workspaceTsFiles.delete(fsPath);
-        workspaceEtaFiles.delete(fsPath);
-      } else if (isWorkspaceSourceFile(fsPath)) {
-        workspaceTsFiles.add(fsPath);
-      } else if (isEtaTemplateFile(fsPath)) {
-        workspaceEtaFiles.add(fsPath);
-      } else {
-        continue;
-      }
+    const fsPath = getWatchedWorkspaceFile(change.uri);
+    if (!fsPath) continue;
+    const canonical = canonicalTemplatePath(canonicalExistingPath(fsPath));
+    if ([...workspaceManifests.values()].some((manifest) => manifest.inputs.has(canonical))) {
       needsReanalysis = true;
-    } catch {
-      // unparseable URI; skip
+      continue;
+    }
+    // Extended configs and JSON imports may use arbitrary filenames.
+    if (isWorkspaceConfigFile(fsPath) || path.extname(fsPath).toLowerCase() === ".json") {
+      configChanged = true;
+      needsReanalysis = true;
+    } else if (updateWatchedSourceFile(fsPath, change.type)) {
+      if (change.type !== FileChangeType.Changed) configChanged = true;
+      needsReanalysis = true;
     }
   }
   if (configChanged) refreshWorkspaceFiles();
@@ -598,12 +751,16 @@ interface VirtualPosition {
 function getVirtualPosition(
   params: TextDocumentPositionParams,
 ): VirtualPosition | undefined {
+  // All subsequent metadata lookups in this synchronous LSP request share one
+  // freshness sweep per boundary; the next request observes filesystem changes.
+  checkedManifestRoots.clear();
   const doc = documents.get(params.textDocument.uri);
   if (!doc) return undefined;
 
   const docText = doc.getText();
   const options = getDocumentLanguageOptions(params.textDocument.uri);
   if (
+    !getFreshManifestTemplate(params.textDocument.uri, docText) &&
     !isInsideEtaTagInText(
       docText,
       params.position.line,
@@ -659,7 +816,7 @@ connection.onCompletion((params: TextDocumentPositionParams) => {
       const registeredNames =
         manifest?.templateNames.keys() ?? templateRegistrationMap.keys();
       return getTemplatePathCompletions(
-        fileURLToPath(params.textDocument.uri),
+        canonicalExistingPath(fileURLToPath(params.textDocument.uri)),
         pathContext.value,
         workspaceEtaFiles,
         resolutionOptions?.views,
@@ -763,7 +920,7 @@ function getResolvedTemplatePathLocations(
   try {
     const resolutionOptions = getDocumentResolutionOptions(uri);
     const target = resolveTemplatePath(templateName, {
-      fromFile: fileURLToPath(uri),
+      fromFile: canonicalExistingPath(fileURLToPath(uri)),
       views: resolutionOptions?.views,
       defaultExtension: resolutionOptions?.defaultExtension,
       templateFiles: workspaceEtaFiles,
@@ -949,7 +1106,7 @@ function getInferredDataDefinitionLocations(
     });
   }
 
-  return getDataDefinitionsForUri(uri, dataPath).flatMap((definition) => {
+  return getDataDefinitionsForUri(getInferenceUri(uri), dataPath).flatMap((definition) => {
     const location = locationFromFileOffsets(
       definition.fileName,
       definition.start,
@@ -1243,6 +1400,45 @@ interface ServerDiagnostic {
   source: string;
 }
 
+function collectInferenceDiagnostic(
+  uri: string,
+  source: string,
+  options: EtaLanguageOptions,
+): ServerDiagnostic[] {
+  if (getFreshManifestTemplate(uri, source)) return [];
+  const localFile = localWorkspaceFolder(uri);
+  const root = localFile && getWorkspaceManifestRoot(localFile);
+  const problem = root && workspaceManifestProblems.get(root);
+  if (problem) return [{
+    range: locationFromOffsets(uri, source, 0, Math.min(source.length, 1)).range,
+    severity: DiagnosticSeverity.Information,
+    source: "Eta",
+    message: `Manifest unavailable: ${problem}. Regenerate .eta-language-support.json from your trusted build.`,
+  }];
+  if (hasInferredItTypeForUri(getInferenceUri(uri))) return [];
+  const virtualPath = getVirtualPath(uri);
+  const sourceMap = virtualDocuments.get(virtualPath);
+  const virtualSource = getLanguageService().getProgram()?.getSourceFile(virtualPath);
+  if (!sourceMap || !virtualSource) return [];
+  let dataRange: { start: number; length: number } | undefined;
+  const visit = (node: ts.Node): void => {
+    if (dataRange) return;
+    if (ts.isIdentifier(node) && node.text === options.varName) {
+      dataRange = virtualRangeToSource(sourceMap, node.getStart(virtualSource), node.getWidth(virtualSource));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(virtualSource);
+  if (!dataRange) return [];
+  return [{
+    range: locationFromOffsets(uri, source, dataRange.start, dataRange.length).range,
+    severity: DiagnosticSeverity.Information,
+    source: "Eta",
+    message: `Template data is ${DEFAULT_IT_TYPE} because no render data could be inferred. ` +
+      "Use a typed Eta render call or generate .eta-language-support.json from your trusted build.",
+  }];
+}
+
 function getUnclosedEtaTagMessage(
   unclosedState: "string" | "block-comment" | undefined,
 ): string {
@@ -1410,6 +1606,7 @@ function collectRuntimeJavaScriptDiagnostics(
 function publishDiagnostics(uri: string): void {
   const document = documents.get(uri);
   if (!document) return;
+  activateWorkspaceProject(uri);
   const source = document.getText();
   const options = getDocumentLanguageOptions(uri);
   const manifestTemplate = getFreshManifestTemplate(uri, source);
@@ -1417,14 +1614,16 @@ function publishDiagnostics(uri: string): void {
     ...collectEtaDiagnostics(uri, source, options),
     ...collectTypeScriptDiagnostics(uri, source),
     ...collectManifestDiagnostics(uri, source),
+    ...collectInferenceDiagnostic(uri, source, options),
     ...(manifestTemplate
       ? []
       : collectRuntimeJavaScriptDiagnostics(uri, source, options)),
   ];
-  connection.sendDiagnostics({ uri, diagnostics });
+  void connection.sendDiagnostics({ uri, diagnostics });
 }
 
 connection.languages.semanticTokens.on((params) => {
+  checkedManifestRoots.clear();
   const document = documents.get(params.textDocument.uri);
   if (!document) return { data: [] };
   const source = document.getText();

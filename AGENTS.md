@@ -39,7 +39,7 @@ bun run test:ui
 Notes:
 
 - `bun run test` runs the package `test` script, which uses `vitest run`.
-- `bun run compile` runs `tsc -p ./` and emits to `out/`.
+- `bun run compile` runs `tsc -p ./ --noEmit` and bundles CommonJS entry points into `out/` with tsdown.
 - Tests run in the Node environment via `vitest.config.ts`.
 - The lockfile is `bun.lock`. Use Bun for installs, script execution, and lockfile updates unless explicitly asked otherwise.
 
@@ -48,7 +48,7 @@ Notes:
 - Keep source edits in `src/`, syntax edits in `syntaxes/`, snippets in `snippets/`, fixtures in `templates/`, and demo-only examples in `demo/`.
 - Do not hand-edit `out/`; regenerate it with `bun run compile`.
 - Do not commit or rely on `node_modules/`, coverage output, `.vitest/`, `.vsix`, `dist/`, or other ignored generated artifacts.
-- Preserve strict TypeScript compatibility. `tsconfig.json` uses `strict: true`, CommonJS modules, ES2020 target, declarations, and source maps.
+- Preserve strict TypeScript compatibility. `tsconfig.json` uses `strict: true`, ESNext modules with Bundler resolution, and an ES2020 target; tsdown emits CommonJS runtime bundles.
 - Prefer focused changes that match the existing style: double quotes, semicolons, explicit exported helpers where tests need direct coverage.
 - When changing Eta tag parsing, be careful with character and line offsets. The language server intentionally pads non-TypeScript template text with spaces so TypeScript diagnostics/completions map back to the original Eta source.
 - Keep `PREAMBLE_LINE_COUNT` accurate if the virtual TypeScript preamble changes. Tests depend on the fixed line offset.

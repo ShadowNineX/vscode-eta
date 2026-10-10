@@ -11,6 +11,8 @@ import {
 export const ETA_LANGUAGE_SUPPORT_MANIFEST = ".eta-language-support.json";
 const ETA_LANGUAGE_SUPPORT_MANIFEST_VERSION = 1;
 export const MAX_MANIFEST_BYTES = 5 * 1024 * 1024;
+/** Bounds synchronous request-time filesystem observations per manifest. */
+export const MAX_MANIFEST_FILES = 1024;
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const IDENTIFIER_PATTERN = /^[A-Za-z_$][\w$]*$/;
@@ -84,6 +86,8 @@ export interface EtaManifestSymbol {
 export interface EtaLanguageSupportManifest {
   root: string;
   fileName: string;
+  /** Absolute canonical input path -> hash recorded when the manifest was built. */
+  inputs: Map<string, string>;
   templates: Map<string, EtaManifestTemplate>;
   templateNames: Map<string, EtaManifestTemplateName>;
   symbols: EtaManifestSymbol[];
@@ -92,11 +96,12 @@ export interface EtaLanguageSupportManifest {
 
 export type EtaManifestLoadResult =
   | { status: "missing"; messages: string[] }
-  | { status: "invalid" | "stale"; messages: string[] }
+  | { status: "invalid" | "stale"; messages: string[]; observedFiles?: string[] }
   | {
       status: "loaded";
       manifest: EtaLanguageSupportManifest;
       messages: string[];
+      observedFiles?: string[];
     };
 
 class ManifestError extends Error {
@@ -215,11 +220,10 @@ function isContained(root: string, candidate: string): boolean {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
-function resolveContainedPath(
+function resolveContainedCandidate(
   root: string,
   value: unknown,
   label: string,
-  expected: "file" | "directory" = "file",
 ): string {
   const relativePath = assertString(value, label, { maxLength: MAX_PATH_LENGTH });
   if (
@@ -234,11 +238,21 @@ function resolveContainedPath(
   }
   const candidate = path.resolve(root, ...relativePath.split("/"));
   if (!isContained(root, candidate)) invalid(`${label} escapes the workspace root`);
+  return candidate;
+}
+
+function resolveContainedPath(
+  root: string,
+  value: unknown,
+  label: string,
+  expected: "file" | "directory" = "file",
+): string {
+  const candidate = resolveContainedCandidate(root, value, label);
   let resolved: string;
   try {
     resolved = fs.realpathSync(candidate);
   } catch {
-    stale(`${label} does not exist: ${relativePath}`);
+    stale(`${label} does not exist: ${String(value)}`);
   }
   if (!isContained(root, resolved)) invalid(`${label} resolves outside the workspace root`);
   const stats = fs.statSync(resolved);
@@ -584,7 +598,9 @@ function parseTemplate(
     virtualContent.length,
     `${label}.virtualDocument.mappings`,
   );
-  if (mappings.length === 0) invalid(`${label}.virtualDocument.mappings must not be empty`);
+  if (mappings.length === 0 && source.length !== 0) {
+    invalid(`${label}.virtualDocument.mappings must not be empty for a non-empty template`);
+  }
   return {
     fileName,
     sha256: hash,
@@ -609,7 +625,8 @@ function parseTemplate(
   };
 }
 
-function validateManifestInputs(value: unknown, root: string): void {
+function validateManifestInputs(value: unknown, root: string): Map<string, string> {
+  const inputs = new Map<string, string>();
   for (const [index, input] of assertArray(
     value,
     "manifest.inputs",
@@ -621,12 +638,11 @@ function validateManifestInputs(value: unknown, root: string): void {
       inputObject.path,
       `${label}.path`,
     );
-    assertFreshFile(
-      inputFile,
-      assertSha256(inputObject.sha256, `${label}.sha256`),
-      `${label}.sha256`,
-    );
+    const hash = assertSha256(inputObject.sha256, `${label}.sha256`);
+    assertFreshFile(inputFile, hash, `${label}.sha256`);
+    inputs.set(pathKey(inputFile), hash);
   }
+  return inputs;
 }
 
 function parseManifestTemplates(
@@ -869,7 +885,9 @@ function parseManifest(
     );
   }
 
-  validateManifestInputs(object.inputs, root);
+  assertManifestFileBudget(object);
+
+  const inputs = validateManifestInputs(object.inputs, root);
   const templates = parseManifestTemplates(object.templates, root);
   const knownTemplatePaths = new Set(templates.keys());
   validateTemplateRelationships(templates, knownTemplatePaths);
@@ -880,12 +898,62 @@ function parseManifest(
   );
   const symbols = parseManifestSymbols(object.symbols, root);
   const relationships = buildManifestRelationships(templates);
-  return { root, fileName, templates, templateNames, symbols, relationships };
+  return { root, fileName, inputs, templates, templateNames, symbols, relationships };
+}
+
+function assertManifestFileBudget(value: { inputs?: unknown; templates?: unknown }): void {
+  const inputCount = Array.isArray(value.inputs) ? value.inputs.length : 0;
+  const templateCount = Array.isArray(value.templates) ? value.templates.length : 0;
+  if (inputCount + templateCount > MAX_MANIFEST_FILES) {
+    invalid(`Manifest exceeds ${MAX_MANIFEST_FILES} input/template entries; split metadata across application roots`);
+  }
+}
+
+/**
+ * Validates a manifest value using the exact rules used by the language server.
+ * Build tools use this before replacing the on-disk manifest so a failed build
+ * can never publish data the extension would reject.
+ */
+export function validateEtaLanguageSupportManifest(
+  root: string,
+  value: unknown,
+  fileName = path.join(root, ETA_LANGUAGE_SUPPORT_MANIFEST),
+): EtaLanguageSupportManifest {
+  const realRoot = realWorkspaceRoot(root);
+  return parseManifest(value, realRoot, fileName);
+}
+
+function observableManifestPath(root: string, value: unknown): string | undefined {
+  try {
+    const candidate = resolveContainedCandidate(root, value, "Manifest observation");
+    let ancestor = candidate;
+    while (!fs.existsSync(ancestor)) ancestor = path.dirname(ancestor);
+    return isContained(root, fs.realpathSync(ancestor)) ? candidate : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function collectObservableManifestFiles(root: string, value: unknown): string[] {
+  if (!value || typeof value !== "object") return [];
+  const object = value as { inputs?: unknown; templates?: unknown };
+  assertManifestFileBudget(object);
+  const paths = new Set<string>();
+  for (const collection of [object.inputs, object.templates]) {
+    if (!Array.isArray(collection) || collection.length > MAX_COLLECTION_LENGTH) continue;
+    for (const entry of collection) {
+      if (!entry || typeof entry !== "object") continue;
+      const fileName = observableManifestPath(root, (entry as { path?: unknown }).path);
+      if (fileName) paths.add(fileName);
+    }
+  }
+  return [...paths];
 }
 
 export function loadEtaLanguageSupportManifest(root: string): EtaManifestLoadResult {
   const manifestPath = path.join(root, ETA_LANGUAGE_SUPPORT_MANIFEST);
   if (!fs.existsSync(manifestPath)) return { status: "missing", messages: [] };
+  let observedFiles: string[] = [];
   try {
     const realRoot = realWorkspaceRoot(root);
     const realManifest = fs.realpathSync(manifestPath);
@@ -904,16 +972,20 @@ export function loadEtaLanguageSupportManifest(root: string): EtaManifestLoadRes
     } catch (error) {
       invalid(`Manifest is not valid JSON: ${String(error)}`);
     }
+    // Safe paths are observation hints only. They never authorize metadata from
+    // an invalid/stale manifest, but allow recovery after a missing input returns.
+    observedFiles = collectObservableManifestFiles(realRoot, value);
     return {
       status: "loaded",
       manifest: parseManifest(value, realRoot, realManifest),
       messages: [],
+      observedFiles,
     };
   } catch (error) {
     if (error instanceof ManifestError) {
-      return { status: error.kind, messages: [error.message] };
+      return { status: error.kind, messages: [error.message], observedFiles };
     }
-    return { status: "invalid", messages: [String(error)] };
+    return { status: "invalid", messages: [String(error)], observedFiles };
   }
 }
 

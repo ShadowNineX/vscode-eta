@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/icon.png" alt="Eta IntelliSense icon" width="112" height="112">
+
 # ⚡ Eta IntelliSense
 
 ### Typed editor tooling for fast, delightful `.eta` templates in VS Code.
@@ -82,11 +84,21 @@ Supported inference sources:
 
 - Eta v3/v4 named template calls: `render(...)` and `renderAsync(...)`.
 - Legacy Eta v2 file calls: `renderFile(...)` and `renderFileAsync(...)`.
-- String literals and no-substitution template literals on recognized Eta instances, including `withConfig(...)`.
+- ES module, namespace, import-equals, re-export and CommonJS bindings, including constructor aliases.
+- `eta`, `eta/core`, `npm:eta` and `jsr:@bgub/eta` entry points (including versioned Deno specifiers).
+- Dot and literal bracket calls, optional access, and methods bound with `bind`, `call` or `apply`.
+- Literal names, immutable aliases, finite string unions, conditional names, concatenation and template interpolation (at most 16 alternatives).
+- Inline instance configuration, `withConfig(...)`, class fields and bounded synchronous factories with parameters, defaults, constant locals and one return expression.
+- Imported synchronous render wrappers that forward template names, data and receivers, including nested forwarding and default parameters.
+- Finite immutable template/data records, retaining each template's matching data instead of mixing records together.
 - Programmatic templates named with `@`, such as `eta.render("@header", data)`.
 - Inherited and explicit data passed through `include(...)` and `layout(...)`, including layout `body` content.
 
-`renderString(...)` and `renderStringAsync(...)` are treated as inline Eta source, so they are not mapped to `.eta` template files.
+`renderString(...)` and `renderStringAsync(...)` can also infer data for a `.eta` file when their source is statically traced to Node `readFileSync(...)`, awaited `fs/promises.readFile(...)`, or Eta's `readFile(...)`. Use an absolute path or anchor it with `__dirname`, `import.meta.dirname` or `new URL("./template.eta", import.meta.url)`; `fileURLToPath(...)` and aliased imports are supported. Relative filesystem reads depend on runtime working directory, so the editor leaves them unresolved. Inline strings and dynamically generated template source cannot be mapped to a file.
+
+Nested TypeScript and JavaScript projects use their own `tsconfig.json` or `jsconfig.json`, including extended configs, path aliases, and referenced projects. Templates inherit compiler settings from their render source, including client/server configs in the same directory. Files outside a config's `include` still receive inference using the nearest project settings. Saving sources, JSON configs, or package metadata refreshes open templates automatically.
+
+Inference uses the data argument's TypeScript or JSDoc type, including imported interfaces, nested objects, arrays, unions, spreads and callbacks with rest parameters, overloads and generics. It preserves `any` and `unknown` declared by your application. Unresolved data uses `Record<string, unknown>` and an information diagnostic explains how to supply type evidence. Reassigned aliases, arbitrary control flow, custom file loaders, dynamically computed methods and runtime framework routing use the manifest described below. Extracted Eta instance methods need their receiver bound, just as they do at runtime.
 
 ## ⚙️ Eta Configuration
 
@@ -138,7 +150,43 @@ The language server can also detect simple inline configs like `new Eta({ tags: 
 
 ### Generated Runtime Manifest
 
-Static analysis cannot resolve values produced by arbitrary application code or Eta plugins. A trusted project build step can bridge those results by writing `.eta-language-support.json` at the workspace root. The extension only validates and reads this file; it never imports the generator, Eta config, application modules, or plugin code.
+Static analysis cannot resolve values produced by arbitrary application code or Eta plugins. The bundled manifest builder bridges those results through an explicitly invoked project build step. Put `.eta-language-support.json` at the workspace root or a nested application's root. The extension only validates and reads it; it never imports the generator, Eta config, application modules, or plugin code.
+
+From this repository, compile first and run:
+
+```sh
+bun run compile
+node out/manifest.js init --config eta.manifest.config.mjs
+# Edit the scaffold, then generate from your explicitly selected config.
+node out/manifest.js generate --config eta.manifest.config.mjs --root .
+node out/manifest.js check --root .
+```
+
+When using the installed extension, replace `out/manifest.js` with the `out/manifest.js` inside its extension directory. Keep the complete `out/` directory together because the CLI uses its bundled helpers and TypeScript library files. `--root` lets you keep the config in a tooling directory. `generate` executes the configuration you explicitly select; `check` only validates existing metadata.
+
+Edit the scaffold to register the templates your application actually loads:
+
+```js
+import { Eta } from "eta";
+import path from "node:path";
+
+export default ({ builder }) => {
+  const eta = new Eta({ views: path.join(builder.root, "views") });
+  builder.addInput("routes.json");
+  builder.addTemplate({
+    path: "views/profile.eta",
+    dataType: { file: "src/models.ts", export: "ProfileData" },
+    eta,
+    names: ["profile", "account/profile"],
+  });
+};
+```
+
+Type references expand exported models into self-contained types and track their source/config dependencies. Register every runtime loader, plugin, route registry and other generator input with `builder.addInput(...)`. Pass types and source locations rather than user data or secrets. A framework adapter can loop over its actual route/template registry and call `addTemplate` with each route's combined locals type. An unrelated object's `.render()` is never assumed to be Eta.
+
+Use `source` with a `.eta-generated/*.eta` path for in-memory templates. Different existing generated contents require `overwriteGenerated: true`. Plugins that transform source, ASTs or generated functions require explicit `virtualDocument.content` and non-overlapping `mappings`; the builder rejects automatic mappings for these plugins. Mapped regions can use plugin syntax outside ordinary Eta tags. Empty templates are supported with zero mappings.
+
+The [support matrix and adapter contract](docs/eta-support.md) describe the static boundaries and runtime path for each pattern.
 
 VS Code validates this filename against [`schemas/eta-language-support.schema.json`](schemas/eta-language-support.schema.json). Manifest version `1` contains:
 
@@ -167,7 +215,7 @@ The `demo/` folder contains a standalone Eta workspace with typed render calls a
 
 ## 🏗 Development
 
-This repository uses Bun.
+This repository uses Bun and Node.js 22.18+ (or supported Node.js 24/26 releases).
 
 ```sh
 bun install
@@ -178,11 +226,14 @@ bun run test
 
 Useful scripts:
 
-- `bun run compile` type-checks and bundles the extension into `out/` with `tsup`.
-- `bun run watch` runs TypeScript in watch mode.
+- `bun run compile` type-checks and bundles the extension into `out/` with `tsdown`.
+- `bun run watch` rebuilds the bundle as source files change.
 - `bun run test` compiles and runs the Vitest suite.
 - `bun run test:ui` opens the Vitest UI.
-- `bun run test:coverage` runs coverage.
+- `bun run test:coverage` compiles and runs the suite once with source coverage.
+- `bun run test:vscode` tests production providers and snippets in an isolated VS Code instance.
+
+Vitest, its UI, and its coverage provider use matching versions. VS Code API types stay pinned to the extension's minimum supported editor version. TypeScript stays on 6.0.3 because the embedded language service requires its JavaScript compiler API; TypeScript 7 is not a drop-in replacement for that API.
 
 ## 🗂 Project Structure
 

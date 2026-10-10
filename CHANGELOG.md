@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added a flat Eta monogram icon for the VS Code Marketplace and project branding.
+- Added a trusted-build manifest builder and CLI for runtime routes, custom loaders, plugins and generated/transformed templates, with hash freshness and validated output.
+- Added bounded imported render wrappers, parameterized factories and paired finite-record inference; replaced missing-evidence `any` with actionable `unknown` diagnostics.
+- Fixed untitled-document activation and stale/nested manifest ownership, including watcher-excluded inputs and transformed syntax outside Eta tags.
+- Preserved dictionary index signatures, public class members and readonly data; fixed linked workspace paths, startup-stale diagnostics, ESM dependency freshness and manifest output collisions.
+- Reduced inference/server complexity and addressed deprecated API, promise and expression warnings reported by SonarQube.
+- Expanded Eta recognition across TS/JS module formats, browser/Deno imports, constructor aliases, bound methods, finite template names, simple factories and file-backed `renderString` calls.
+- Fixed nested/referenced project discovery, template compiler-context ownership, config/source refresh and same-basename type isolation. Preserved self-contained callback types, including rest parameters, overloads and generics.
+- Updated development and LSP dependencies while retaining the compatible TypeScript compiler API and minimum VS Code API types.
+- Fixed Windows LSP test teardown, restored the extension-host test source, made coverage run once, and added Windows/Linux CI with native VS Code tests and inference regression coverage.
+
 ## 0.3.0
 
 - Aligned scanner and virtual-document behavior with Eta 4.6 multiline openers, adjacent-tag boundaries, generated function scope, async templates, render options, and JavaScript runtime syntax.

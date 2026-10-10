@@ -57,20 +57,19 @@ export function activate(context: vscode.ExtensionContext): void {
     debug: { module: serverModule, transport: TransportKind.ipc },
   };
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ scheme: "file", language: "eta" }],
+    documentSelector: [
+      { scheme: "file", language: "eta" },
+      { scheme: "untitled", language: "eta" },
+    ],
     initializationOptions: {
       etaLanguageOptions: getEtaLanguageOptions(),
     },
     synchronize: {
       configurationSection: "eta",
-      // Re-infer data and reload project settings when source/config changes.
+      // The server filters ordinary source/config changes and custom manifest
+      // inputs. It also checks input stamps when watchers exclude a path.
       fileEvents: [
-        vscode.workspace.createFileSystemWatcher(
-          "**/*.{ts,tsx,mts,cts,js,jsx,mjs,cjs,eta}",
-        ),
-        vscode.workspace.createFileSystemWatcher(
-          "**/{tsconfig.json,jsconfig.json,.eta-language-support.json}",
-        ),
+        vscode.workspace.createFileSystemWatcher("**/*"),
       ],
     },
   };

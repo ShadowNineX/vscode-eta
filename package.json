@@ -3,7 +3,7 @@
   "displayName": "Eta IntelliSense",
   "description": "Typed IntelliSense, syntax highlighting, autocomplete, and diagnostics for Eta templates",
   "icon": "assets/icon.png",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publisher": "ShadowNine",
   "license": "MIT",
   "repository": {

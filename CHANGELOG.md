@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
 - Added a flat Eta monogram icon for the VS Code Marketplace and project branding.
 - Added a trusted-build manifest builder and CLI for runtime routes, custom loaders, plugins and generated/transformed templates, with hash freshness and validated output.

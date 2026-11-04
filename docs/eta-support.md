@@ -7,6 +7,7 @@ The extension uses static type evidence where it can prove a connection to Eta. 
 | TS/JS, ESM/CommonJS, JSX, `.mts`/`.cts`/`.mjs`/`.cjs` | Eta imports, constructor aliases, methods and source data types | Register transformed source produced by another language/tool. |
 | Browser/core/Deno Eta imports | Known Eta module specifiers and declarations | Register modules loaded through custom resolvers. |
 | Multiple configs, referenced projects and monorepos | Template compiler settings follow their render source; matching basenames stay isolated | Use a common builder root containing all model/config inputs. |
+| Shared Eta configuration | Static object spreads preserve override order and imported view-path context; unknown spreads invalidate earlier settings | Register dynamically generated runtime options. |
 | Method aliases, bound methods, `call`/`apply` | Immutable proven aliases, literal argument arrays and bound receivers | Register dynamic dispatch results. |
 | Wrappers and factories | Bounded synchronous forwarding, parameters/defaults and constant locals | Evaluate arbitrary control flow in the trusted build. |
 | Template choices and paired data | At most 16 static name alternatives and safe finite immutable records | Enumerate runtime routes/names and register each template's model type. |
@@ -46,4 +47,4 @@ Adapters control the quality of transformed code and maps they provide. The buil
 
 ## Verification
 
-The inference suites cover positive patterns and false-positive guards, including mutation, shadowing, recursion and unrelated render methods. Manifest suites cover generation, hashing, source mapping, output validation and explicit CLI execution. The bundled stdio tests exercise runtime names, model types, generated/transformed source, nested manifest ownership and recovery after inputs change without watcher notifications. Native VS Code tests exercise real providers and snippets, including untitled documents.
+The inference suites cover positive patterns and false-positive guards, including mutation, shadowing, recursion and unrelated render methods. Manifest suites cover generation, hashing, source mapping, output validation and explicit CLI execution. The bundled stdio tests exercise runtime names, model types, generated/transformed source, nested manifest ownership and recovery after inputs change without watcher notifications. Native VS Code tests exercise real providers, source-file refresh, diagnostic recovery and snippets, including untitled documents, in a temporary fixture workspace.

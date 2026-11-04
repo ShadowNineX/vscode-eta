@@ -40,7 +40,7 @@ Notes:
 
 - `bun run test` runs the package `test` script, which uses `vitest run`.
 - `bun run compile` runs `tsc -p ./ --noEmit` and bundles CommonJS entry points into `out/` with tsdown.
-- Tests run in the Node environment via `vitest.config.ts`.
+- Tests run in the Node environment via `vitest.config.mts`.
 - The lockfile is `bun.lock`. Use Bun for installs, script execution, and lockfile updates unless explicitly asked otherwise.
 
 ## Development Rules

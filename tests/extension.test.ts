@@ -37,7 +37,7 @@ const mocks = vi.hoisted(() => {
     output,
     client,
     languageClient: vi.fn(),
-    createFileSystemWatcher: vi.fn((pattern: string) => ({ pattern })),
+    createFileSystemWatcher: vi.fn((pattern: string) => ({ pattern, dispose: vi.fn() })),
     registerCompletionItemProvider: vi.fn(),
     registerHoverProvider: vi.fn(),
   };
@@ -119,8 +119,12 @@ describe("production extension activation", () => {
     expect(mocks.registerHoverProvider).not.toHaveBeenCalled();
     expect(mocks.client.start).toHaveBeenCalledTimes(1);
     expect(subscriptions).toContain(mocks.output);
+    const watcher = mocks.createFileSystemWatcher.mock.results[0].value;
+    expect(subscriptions).toContain(watcher);
 
     await extension.deactivate();
     expect(mocks.client.stop).toHaveBeenCalledTimes(1);
+    for (const disposable of subscriptions) disposable.dispose();
+    expect(watcher.dispose).toHaveBeenCalledTimes(1);
   });
 });

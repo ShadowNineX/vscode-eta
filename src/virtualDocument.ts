@@ -1,7 +1,7 @@
+import ts from "typescript";
 import {
   consumeTagContent,
   consumeTagOpener,
-  isClosedTagContent,
   TagContentChunk,
 } from "./etaScanner";
 import {
@@ -12,12 +12,12 @@ import {
 export const DEFAULT_IT_TYPE = "Record<string, unknown>";
 
 /** Eta built-in function declarations (8 lines). */
-function buildEtaBuiltins(options: EtaLanguageOptions): string {
+function buildEtaBuiltins(options: EtaLanguageOptions, withBindings: string): string {
   const outputFunctionName = options.outputFunctionName || "output";
   return [
     "const include = undefined as unknown as (path: string, data?: Record<string, unknown>) => string;",
     "const includeAsync = undefined as unknown as (path: string, data?: Record<string, unknown>) => Promise<string>;",
-    "const layout = undefined as unknown as (path: string, data?: Record<string, unknown>) => void;",
+    "const layout = undefined as unknown as (path: string, data?: Record<string, unknown>) => void;" + withBindings,
     "const block = undefined as unknown as (name: string, fn?: () => void) => string;",
     "const blockAsync = undefined as unknown as (name: string, fn?: () => Promise<void>) => Promise<string>;",
     `const ${outputFunctionName} = undefined as unknown as (content: unknown) => void;`,
@@ -32,28 +32,41 @@ function singleLine(value: string): string {
 }
 
 function getTopLevelPropertyNames(type: string): string[] {
-  let body = type.trim();
-  if (body.startsWith("{")) body = body.slice(1).trimStart();
-  if (body.endsWith("}")) body = body.slice(0, -1).trimEnd();
+  const source = ts.createSourceFile(
+    "eta-data-type.ts", `type Data = ${type};`, ts.ScriptTarget.Latest, false,
+  );
   const names = new Set<string>();
-  let depth = 0;
-  let current = "";
-
-  for (const ch of body) {
-    if (ch === "{" || ch === "(" || ch === "[") depth++;
-    if (ch === "}" || ch === ")" || ch === "]") depth = Math.max(0, depth - 1);
-    if (ch === ";" && depth === 0) {
-      const match = /^\s*([A-Za-z_$][\w$]*)\??\s*:/.exec(current);
-      if (match) names.add(match[1]);
-      current = "";
-      continue;
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, true);
+  function collect(node: ts.TypeNode): void {
+    if (ts.isParenthesizedTypeNode(node)) {
+      collect(node.type);
+    } else if (ts.isUnionTypeNode(node) || ts.isIntersectionTypeNode(node)) {
+      node.types.forEach(collect);
+    } else if (ts.isTypeLiteralNode(node)) {
+      for (const member of node.members) {
+        if (!member.name || (!ts.isIdentifier(member.name) && !ts.isStringLiteral(member.name))) {
+          continue;
+        }
+        const name = member.name.text;
+        scanner.setText(name);
+        const token = scanner.scan();
+        const identifier = scanner.getTokenText() === name;
+        // Property keys can be reserved words or contain punctuation; only
+        // names that are legal bindings can be exposed as bare variables.
+        if (
+          identifier &&
+          (token === ts.SyntaxKind.Identifier || token > ts.SyntaxKind.LastFutureReservedWord) &&
+          token !== ts.SyntaxKind.AwaitKeyword && token !== ts.SyntaxKind.LetKeyword &&
+          name !== "eval" && name !== "arguments" &&
+          scanner.scan() === ts.SyntaxKind.EndOfFileToken
+        ) {
+          names.add(name);
+        }
+      }
     }
-    current += ch;
   }
-
-  const match = /^\s*([A-Za-z_$][\w$]*)\??\s*:/.exec(current);
-  if (match) names.add(match[1]);
-
+  const declaration = source.statements[0];
+  if (declaration && ts.isTypeAliasDeclaration(declaration)) collect(declaration.type);
   return [...names];
 }
 
@@ -64,15 +77,25 @@ function buildTemplateFunctionStart(
   const safeType = singleLine(itType);
   const asyncPrefix = options.async ? "async " : "";
   const returnType = options.async ? "Promise<void>" : "void";
-  const withBindings = options.useWith
-    ? ` const { ${getTopLevelPropertyNames(safeType).join(", ")} } = ${options.varName};`
-    : "";
   return (
     "type __EtaOverride<Base, Override> = Base extends unknown ? Omit<Base, keyof Override> & Override : never; " +
+    (options.useWith
+      ? "type __EtaWith<T> = { [K in T extends unknown ? keyof T : never]: T extends unknown ? K extends keyof T ? T[K] : undefined : never }; "
+      : "") +
     `${asyncPrefix}function __etaTemplate(${options.varName}: ${safeType}, ` +
     "options: Readonly<{ filepath?: string; async?: boolean }> & " +
-    `Record<string, unknown>): ${returnType} {${withBindings}`
+    `Record<string, unknown>): ${returnType} {`
   );
+}
+
+function buildWithBindings(itType: string, options: EtaLanguageOptions): string {
+  if (!options.useWith) return "";
+  const names = getTopLevelPropertyNames(singleLine(itType));
+  let alias = "__etaWithData";
+  while (names.includes(alias) || alias === options.varName || options.functionHeader.includes(alias)) alias += "_";
+  // Eta's with scope shadows parameters and include/layout, while its
+  // output/capture/block helpers and template-local declarations live inside it.
+  return ` const ${alias} = ${options.varName}; { const { ${names.join(", ")} } = ${alias} as __EtaWith<typeof ${alias}>; {`;
 }
 
 export function buildPreamble(
@@ -86,7 +109,7 @@ export function buildPreamble(
       ? normalizedHeader
       : `${normalizedHeader}\n`;
   }
-  return `${buildTemplateFunctionStart(itType, options)}\n${buildEtaBuiltins(options)}\n${header}`;
+  return `${buildTemplateFunctionStart(itType, options)}\n${header}${buildEtaBuiltins(options, buildWithBindings(itType, options))}\n`;
 }
 
 /** Default preamble size retained for consumers using default Eta options. */
@@ -106,7 +129,8 @@ export function buildVirtualDocument(
   const preamble = buildPreamble(itType, options);
   return {
     content:
-      preamble + buildVirtualContentBody(etaSource, options) + "\n}\nexport {};\n",
+      preamble + buildVirtualContentBody(etaSource, options) +
+      (options.useWith ? "\n}\n}\n" : "\n") + "}\nexport {};\n",
     preambleLineCount: preamble.split("\n").length - 1,
     bodyOffset: preamble.length,
   };
@@ -155,17 +179,6 @@ function maskNonNewlineContent(value: string): string {
   return value.replace(/[^\n]/g, " ");
 }
 
-function shouldTerminateJavaScriptTag(
-  prefix: string,
-  options: EtaLanguageOptions,
-): boolean {
-  return (
-    prefix === options.parse.exec ||
-    prefix === options.parse.interpolate ||
-    prefix === options.parse.raw
-  );
-}
-
 function terminateJavaScriptTag(js: string): string {
   for (let i = js.length - 1; i >= 0; i--) {
     if (js[i] === " ") {
@@ -175,22 +188,46 @@ function terminateJavaScriptTag(js: string): string {
   return js;
 }
 
+function maskTrailingLineComment(js: string): string {
+  if (!js.includes("//")) return js;
+  // Parse only tags containing a possible line comment. TypeScript distinguishes
+  // comments from regexes and template/string literals, even in partial code.
+  const source = ts.createSourceFile("eta-tag.js", js, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS);
+  const ranges = new Map<number, ts.CommentRange>();
+  function visit(node: ts.Node): void {
+    for (const range of [
+      ...(ts.getLeadingCommentRanges(js, node.pos) ?? []),
+      ...(ts.getTrailingCommentRanges(js, node.end) ?? []),
+    ]) {
+      if (range.kind === ts.SyntaxKind.SingleLineCommentTrivia && range.end === js.length) {
+        ranges.set(range.pos, range);
+      }
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  const characters = js.split("");
+  for (const { pos, end } of ranges.values()) {
+    for (let i = pos; i < end; i++) characters[i] = " ";
+  }
+  return characters.join("");
+}
+
 function consumeVirtualTag(
   source: string,
   start: number,
   options: EtaLanguageOptions,
 ): TagContentChunk {
   const opener = consumeTagOpener(source, start, options);
-  const terminateTag = shouldTerminateJavaScriptTag(opener.prefix, options);
   let js = " ".repeat(opener.padLen);
   let cursor = opener.next;
 
   while (cursor < source.length) {
     const content = consumeTagContent(source, cursor, options);
     js += opener.contentIsJs ? content.js : maskNonNewlineContent(content.js);
-    if (isClosedTagContent(source, cursor, content.next, options)) {
+    if (content.closed) {
       return {
-        js: terminateTag ? terminateJavaScriptTag(js) : js,
+        js: opener.contentIsJs ? terminateJavaScriptTag(maskTrailingLineComment(js)) : js,
         next: content.next,
       };
     }

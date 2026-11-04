@@ -657,7 +657,7 @@ function getStaticPathValue(
   if (resolved !== expr) {
     return getStaticPathValue(
       resolved,
-      resolved.getSourceFile(),
+      resolved.getSourceFile() || sourceFile,
       checker,
     );
   }
@@ -673,7 +673,11 @@ function getStaticPathComponent(
 ): string | undefined {
   const resolved = checker ? resolveStaticExpression(expr, checker) : expr;
   if (resolved !== expr) {
-    return getStaticPathComponent(resolved, resolved.getSourceFile(), checker);
+    return getStaticPathComponent(
+      resolved,
+      resolved.getSourceFile() || sourceFile,
+      checker,
+    );
   }
   const literal = getStringLiteralValue(expr);
   if (literal !== undefined) return literal;
@@ -726,6 +730,52 @@ function getStringArrayLiteralValue(expr: ts.Expression): string[] | undefined {
   return values;
 }
 
+function getStaticObjectProperties(
+  object: ts.ObjectLiteralExpression,
+  checker: ts.TypeChecker,
+): Map<string, ts.Expression> {
+  const properties = new Map<string, ts.Expression>();
+  collectStaticObjectProperties(object, checker, properties, new Set());
+  return properties;
+}
+
+function collectStaticObjectProperties(
+  object: ts.ObjectLiteralExpression,
+  checker: ts.TypeChecker,
+  properties: Map<string, ts.Expression>,
+  seen: Set<ts.ObjectLiteralExpression>,
+): void {
+  if (seen.has(object)) {
+    properties.clear();
+    return;
+  }
+  seen.add(object);
+  try {
+    for (const property of object.properties) {
+      if (ts.isSpreadAssignment(property)) {
+        const spread = resolveStaticExpression(property.expression, checker);
+        if (!ts.isObjectLiteralExpression(spread)) {
+          // An unknown spread can overwrite every previously known property.
+          // Later direct assignments remain safe to retain.
+          properties.clear();
+          continue;
+        }
+        collectStaticObjectProperties(spread, checker, properties, seen);
+        continue;
+      }
+      if (ts.isShorthandPropertyAssignment(property)) {
+        properties.set(property.name.text, property.name);
+        continue;
+      }
+      if (!ts.isPropertyAssignment(property)) continue;
+      const name = getPropertyName(property.name);
+      if (name !== undefined) properties.set(name, property.initializer);
+    }
+  } finally {
+    seen.delete(object);
+  }
+}
+
 function getCustomTagPrefixes(expr: ts.Expression): string[] | undefined {
   if (ts.isObjectLiteralExpression(expr)) {
     return expr.properties.flatMap((property) => {
@@ -738,23 +788,27 @@ function getCustomTagPrefixes(expr: ts.Expression): string[] | undefined {
 }
 
 function getTagsConfig(
-  object: ts.ObjectLiteralExpression,
+  properties: ReadonlyMap<string, ts.Expression>,
 ): [string, string] | undefined {
-  const tags = getObjectProperty(object, "tags");
+  const tags = properties.get("tags");
   const values = tags ? getStringArrayLiteralValue(tags) : undefined;
   return values && values.length >= 2 ? [values[0], values[1]] : undefined;
 }
 
 function getParseConfig(
-  object: ts.ObjectLiteralExpression,
+  properties: ReadonlyMap<string, ts.Expression>,
+  checker: ts.TypeChecker,
 ): EtaLanguageOptions["parse"] | undefined {
-  const parse = getObjectProperty(object, "parse");
-  if (!parse || !ts.isObjectLiteralExpression(parse)) return undefined;
+  const parse = properties.get("parse");
+  if (!parse) return undefined;
+  const resolved = resolveStaticExpression(parse, checker);
+  if (!ts.isObjectLiteralExpression(resolved)) return undefined;
+  const parseProperties = getStaticObjectProperties(resolved, checker);
 
   const config: Partial<EtaLanguageOptions["parse"]> = {};
-  const exec = getObjectProperty(parse, "exec");
-  const interpolate = getObjectProperty(parse, "interpolate");
-  const raw = getObjectProperty(parse, "raw");
+  const exec = parseProperties.get("exec");
+  const interpolate = parseProperties.get("interpolate");
+  const raw = parseProperties.get("raw");
 
   if (exec) config.exec = getStringLiteralValue(exec) ?? "";
   if (interpolate) config.interpolate = getStringLiteralValue(interpolate) ?? "=";
@@ -764,18 +818,18 @@ function getParseConfig(
 }
 
 function getStringProperty(
-  object: ts.ObjectLiteralExpression,
+  properties: ReadonlyMap<string, ts.Expression>,
   propertyName: string,
 ): string | undefined {
-  const value = getObjectProperty(object, propertyName);
+  const value = properties.get(propertyName);
   return value ? getStringLiteralValue(value) : undefined;
 }
 
 function getBooleanProperty(
-  object: ts.ObjectLiteralExpression,
+  properties: ReadonlyMap<string, ts.Expression>,
   propertyName: string,
 ): boolean | undefined {
-  const value = getObjectProperty(object, propertyName);
+  const value = properties.get(propertyName);
   return value ? getBooleanLiteralValue(value) : undefined;
 }
 
@@ -788,9 +842,9 @@ function getTrimModeLiteralValue(
 }
 
 function getAutoTrimConfig(
-  object: ts.ObjectLiteralExpression,
+  properties: ReadonlyMap<string, ts.Expression>,
 ): EtaLanguageOptions["autoTrim"] {
-  const value = getObjectProperty(object, "autoTrim");
+  const value = properties.get("autoTrim");
   if (!value) return undefined;
   if (ts.isArrayLiteralExpression(value) && value.elements.length >= 2) {
     const before = getTrimModeLiteralValue(value.elements[0] as ts.Expression);
@@ -804,34 +858,36 @@ function getAutoTrimConfig(
 
 function getEtaConfigFromObjectLiteral(
   object: ts.ObjectLiteralExpression,
+  checker: ts.TypeChecker,
+  properties = getStaticObjectProperties(object, checker),
 ): Partial<EtaLanguageOptions> {
   const config: Partial<EtaLanguageOptions> = {};
 
-  const tags = getTagsConfig(object);
+  const tags = getTagsConfig(properties);
   if (tags) config.tags = tags;
 
-  const parse = getParseConfig(object);
+  const parse = getParseConfig(properties, checker);
   if (parse) config.parse = parse;
 
-  const customTags = getObjectProperty(object, "customTags");
+  const customTags = properties.get("customTags");
   const customTagPrefixes = customTags
     ? getCustomTagPrefixes(customTags)
     : undefined;
   if (customTagPrefixes) config.customTags = customTagPrefixes;
 
-  config.varName = getStringProperty(object, "varName");
+  config.varName = getStringProperty(properties, "varName");
 
-  config.useWith = getBooleanProperty(object, "useWith");
+  config.useWith = getBooleanProperty(properties, "useWith");
 
-  config.functionHeader = getStringProperty(object, "functionHeader");
+  config.functionHeader = getStringProperty(properties, "functionHeader");
 
-  config.outputFunctionName = getStringProperty(object, "outputFunctionName");
+  config.outputFunctionName = getStringProperty(properties, "outputFunctionName");
 
-  config.async = getBooleanProperty(object, "async");
-  config.autoEscape = getBooleanProperty(object, "autoEscape");
-  config.autoFilter = getBooleanProperty(object, "autoFilter");
-  config.autoTrim = getAutoTrimConfig(object);
-  config.rmWhitespace = getBooleanProperty(object, "rmWhitespace");
+  config.async = getBooleanProperty(properties, "async");
+  config.autoEscape = getBooleanProperty(properties, "autoEscape");
+  config.autoFilter = getBooleanProperty(properties, "autoFilter");
+  config.autoTrim = getAutoTrimConfig(properties);
+  config.rmWhitespace = getBooleanProperty(properties, "rmWhitespace");
 
   return config;
 }
@@ -844,18 +900,26 @@ function getEtaInstanceConfigFromExpression(
   const resolved = expr ? resolveStaticExpression(expr, checker) : undefined;
   const object =
     resolved && ts.isObjectLiteralExpression(resolved) ? resolved : undefined;
-  const viewsExpression = object
-    ? getObjectProperty(object, "views")
-    : undefined;
+  const properties = object
+    ? getStaticObjectProperties(object, checker)
+    : new Map<string, ts.Expression>();
+  const viewsExpression = properties.get("views");
+  let views: string | undefined;
+  if (viewsExpression) {
+    const viewsSourceFile = viewsExpression.pos >= 0
+      ? viewsExpression.getSourceFile() || sourceFile
+      : sourceFile;
+    if (viewsSourceFile) {
+      views = getStaticPathValue(viewsExpression, viewsSourceFile, checker);
+    }
+  }
   return {
     languageOptions: object
-      ? normalizeEtaLanguageOptions(getEtaConfigFromObjectLiteral(object))
+      ? normalizeEtaLanguageOptions(getEtaConfigFromObjectLiteral(object, checker, properties))
       : DEFAULT_ETA_LANGUAGE_OPTIONS,
-    views: viewsExpression && sourceFile
-      ? getStaticPathValue(viewsExpression, sourceFile, checker)
-      : undefined,
+    views,
     defaultExtension:
-      (object && getStringProperty(object, "defaultExtension")) || ".eta",
+      (object && getStringProperty(properties, "defaultExtension")) || ".eta",
   };
 }
 

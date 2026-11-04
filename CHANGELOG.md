@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Fixed nested JavaScript template literals, adjacent JavaScript custom tags and trailing line comments breaking Eta diagnostics or IntelliSense.
+- Preserved shared Eta configuration spreads and property override order during static inference.
+- Fixed `useWith` bindings for union data shapes, readonly fields, quoted property names and helper/parameter shadowing.
+- Released the workspace file watcher when the extension shuts down and expanded native editor tests for source refresh and diagnostic recovery.
+- Updated compatible dependencies, including Vitest and its patched transitive packages; retained the supported TypeScript compiler API and VS Code baseline.
+
 ## 0.4.0
 
 - Added a flat Eta monogram icon for the VS Code Marketplace and project branding.

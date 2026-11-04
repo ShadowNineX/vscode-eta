@@ -56,6 +56,8 @@ export function activate(context: vscode.ExtensionContext): void {
     run: { module: serverModule, transport: TransportKind.ipc },
     debug: { module: serverModule, transport: TransportKind.ipc },
   };
+  const fileWatcher = vscode.workspace.createFileSystemWatcher("**/*");
+  context.subscriptions.push(fileWatcher);
   const clientOptions: LanguageClientOptions = {
     documentSelector: [
       { scheme: "file", language: "eta" },
@@ -68,9 +70,7 @@ export function activate(context: vscode.ExtensionContext): void {
       configurationSection: "eta",
       // The server filters ordinary source/config changes and custom manifest
       // inputs. It also checks input stamps when watchers exclude a path.
-      fileEvents: [
-        vscode.workspace.createFileSystemWatcher("**/*"),
-      ],
+      fileEvents: [fileWatcher],
     },
   };
   client = new LanguageClient(

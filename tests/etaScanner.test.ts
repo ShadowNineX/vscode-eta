@@ -157,6 +157,21 @@ describe("consumeTagContent", () => {
     expect(next).toBe(7);
   });
 
+  it("ignores delimiters inside nested template literals", () => {
+    const source = "`outer ${`inner %> value`}` %>";
+    const { js, next } = consumeTagContent(source, 0);
+
+    expect(js).toBe("`outer ${`inner %> value`}`   ");
+    expect(next).toBe(source.length);
+  });
+
+  it("keeps nested interpolation braces and comments inside template literals", () => {
+    const source = "`value ${({ nested: /* %> */ { count: 1 } }).nested.count}` %>";
+    const { next } = consumeTagContent(source, 0);
+
+    expect(next).toBe(source.length);
+  });
+
   it("ignores %> inside a block comment", () => {
     const { js, next } = consumeTagContent("/* %> */ value %>", 0);
     expect(js).toBe("/* %> */ value   ");
@@ -219,6 +234,13 @@ describe("findEtaTagRanges", () => {
     expect(findEtaTagRanges("<% /* unterminated")[0].unclosedState).toBe(
       "block-comment",
     );
+  });
+
+  it("classifies an unclosed template literal as a string", () => {
+    expect(findEtaTagRanges("<%= `value ${it.name}")[0]).toMatchObject({
+      closed: false,
+      unclosedState: "string",
+    });
   });
 
   it("marks empty tags", () => {

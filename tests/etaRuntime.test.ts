@@ -52,6 +52,49 @@ describe("Eta 4.6 runtime parity", () => {
     expect(runtimeSyntaxDiagnostics(commentTemplate)).toEqual([]);
   });
 
+  it("keeps delimiters inside nested JavaScript template literals", () => {
+    const eta = new Eta();
+    const template = "<%= `outer ${`inner %> value`}` %>";
+
+    expect(eta.renderString(template, {})).toBe("outer inner %&gt; value");
+    expect(findEtaTagRanges(template)).toMatchObject([
+      { closed: true, end: template.length },
+    ]);
+    expect(runtimeSyntaxDiagnostics(template)).toEqual([]);
+  });
+
+  it("keeps CRLF and nested braces in JavaScript template literals", () => {
+    const eta = new Eta();
+    const template = "first\r\n<%= `outer ${({ text: `inner %> value` /* } */ }).text}` %>";
+
+    expect(eta.renderString(template, {})).toBe("first\nouter inner %&gt; value");
+    expect(findEtaTagRanges(template)).toMatchObject([
+      { closed: true, end: template.length },
+    ]);
+    expect(runtimeSyntaxDiagnostics(template)).toEqual([]);
+  });
+
+  it("matches Eta when a template interpolation contains a regex with backticks", () => {
+    const eta = new Eta();
+    const template = "<%= `x ${/`%>/.test(\"`%>\")}` %>";
+
+    expect(eta.renderString(template, {})).toBe("x true");
+    expect(findEtaTagRanges(template)).toMatchObject([
+      { closed: true, end: template.length },
+    ]);
+    expect(runtimeSyntaxDiagnostics(template)).toEqual([]);
+  });
+
+  it("does not recover from malformed nested template literals by consuming later Eta tags", () => {
+    const eta = new Eta();
+    const template = "<%= `unterminated ${it.name %>\n<%= it.name %>";
+
+    expect(() => eta.renderString(template, { name: "Ada" })).toThrow(/unclosed string/);
+    expect(findEtaTagRanges(template)).toMatchObject([
+      { closed: false, end: template.length, unclosedState: "string" },
+    ]);
+  });
+
   it("inserts valid boundaries between adjacent execution tags", () => {
     const template =
       "<% const first = 1 %><% const second = 2 %><%= first + second %>";

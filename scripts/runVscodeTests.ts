@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { runTests } from "@vscode/test-electron";
 
@@ -11,7 +12,7 @@ async function main(): Promise<void> {
     "suite",
     "index.js",
   );
-  const workspacePath = path.resolve(
+  const fixturePath = path.resolve(
     process.cwd(),
     "tests",
     "vscode",
@@ -29,19 +30,27 @@ async function main(): Promise<void> {
         )
       : undefined);
 
-  await runTests({
-    extensionDevelopmentPath,
-    extensionTestsPath,
-    launchArgs: [
-      workspacePath,
-      "--disable-extensions",
-      "--skip-release-notes",
-      "--skip-welcome",
-    ],
-    reuseMachineInstall: false,
-    vscodeExecutablePath:
-      installedPath && fs.existsSync(installedPath) ? installedPath : undefined,
-  });
+  const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), "eta-vscode-"));
+  try {
+    fs.cpSync(fixturePath, workspacePath, { recursive: true });
+    await runTests({
+      extensionDevelopmentPath,
+      extensionTestsPath,
+      launchArgs: [
+        workspacePath,
+        "--disable-extensions",
+        "--skip-release-notes",
+        "--skip-welcome",
+      ],
+      reuseMachineInstall: false,
+      vscodeExecutablePath:
+        installedPath && fs.existsSync(installedPath) ? installedPath : undefined,
+    });
+  } finally {
+    if (path.dirname(workspacePath) === path.resolve(os.tmpdir())) {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+  }
 }
 
 main().catch((error: unknown) => {

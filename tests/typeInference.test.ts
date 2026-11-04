@@ -618,6 +618,109 @@ describe("analyzeFileForEtaCalls", () => {
     });
   });
 
+  it("merges statically spread Eta configuration with JavaScript precedence", () => {
+    templateResolutionOptionsMap.clear();
+    const sharedViews = path.resolve("eta-shared-views");
+    const { checker, sf } = makeTestProgram(
+      `import { Eta } from "eta";
+       const shared = {
+         views: ${JSON.stringify(sharedViews)},
+         varName: "sharedData",
+         outputFunctionName: "sharedPrint",
+         parse: { interpolate: ":" }
+       };
+       const derived = {
+         ...shared,
+         varName: "derivedData",
+         outputFunctionName: "derivedPrint",
+         ...shared
+       };
+       const eta = new Eta({
+         varName: "beforeSpread",
+         ...derived,
+         varName: "finalData"
+       });
+       eta.render("spread-profile", { name: "Ada" });`,
+    );
+
+    analyzeFileForEtaCalls(sf, checker);
+
+    expect(templateLanguageOptionsMap.get("spread-profile")).toMatchObject({
+      varName: "finalData",
+      outputFunctionName: "sharedPrint",
+      parse: { interpolate: ":" },
+    });
+    expect(templateResolutionOptionsMap.get("spread-profile")).toEqual({
+      views: sharedViews,
+      defaultExtension: ".eta",
+    });
+  });
+
+  it("does not retain properties that an unknown Eta config spread can overwrite", () => {
+    templateResolutionOptionsMap.clear();
+    const { checker, sf } = makeTestProgram(
+      `import { Eta } from "eta";
+       declare const runtimeConfig: Record<string, unknown>;
+       const eta = new Eta({
+         views: ${JSON.stringify(path.resolve("known-views"))},
+         varName: "knownData",
+         ...{ ...runtimeConfig, varName: "laterKnownData" }
+       });
+       eta.render("unknown-spread", { name: "Ada" });`,
+    );
+
+    analyzeFileForEtaCalls(sf, checker);
+
+    expect(templateLanguageOptionsMap.get("unknown-spread")?.varName).toBe("laterKnownData");
+    expect(templateResolutionOptionsMap.get("unknown-spread")).toEqual({
+      views: undefined,
+      defaultExtension: ".eta",
+    });
+  });
+
+  it("uses the imported config module as the base for spread view paths", () => {
+    templateResolutionOptionsMap.clear();
+    const root = fs.mkdtempSync(path.join(process.cwd(), "eta-config-spread-"));
+    try {
+      const configDirectory = path.join(root, "lib");
+      fs.mkdirSync(configDirectory);
+      const configPath = path.join(configDirectory, "shared.ts");
+      const entryPath = path.join(root, "render.ts");
+      fs.writeFileSync(
+        configPath,
+        'export const shared = { views: __dirname, varName: "data" };\n',
+      );
+      fs.writeFileSync(
+        entryPath,
+        'import { Eta } from "eta";\n' +
+          'import { shared } from "./lib/shared";\n' +
+          'new Eta({ ...shared }).render("profile", { name: "Ada" });\n',
+      );
+      const program = ts.createProgram({
+        rootNames: [entryPath],
+        options: {
+          module: ts.ModuleKind.ESNext,
+          moduleResolution: ts.ModuleResolutionKind.Bundler,
+          target: ts.ScriptTarget.ES2020,
+          noEmit: true,
+          skipLibCheck: true,
+        },
+      });
+      const source = program.getSourceFile(entryPath);
+      if (!source) throw new Error("Expected imported Eta config fixture source");
+
+      analyzeFileForEtaCalls(source, program.getTypeChecker());
+
+      expect(templateLanguageOptionsMap.get("profile")?.varName).toBe("data");
+      expect(templateResolutionOptionsMap.get("profile")).toEqual({
+        views: configDirectory,
+        defaultExtension: ".eta",
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("applies simple eta.configure({ ... }) calls before render analysis", () => {
     const { checker, sf } = makeTestProgram(
       `declare class Eta {

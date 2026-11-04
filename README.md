@@ -231,9 +231,11 @@ Useful scripts:
 - `bun run test` compiles and runs the Vitest suite.
 - `bun run test:ui` opens the Vitest UI.
 - `bun run test:coverage` compiles and runs the suite once with source coverage.
-- `bun run test:vscode` tests production providers and snippets in an isolated VS Code instance.
+- `bun run test:vscode` tests production providers, source refresh, diagnostic recovery and snippets in an isolated VS Code instance and a temporary fixture workspace.
 
 Vitest, its UI, and its coverage provider use matching versions. VS Code API types stay pinned to the extension's minimum supported editor version. TypeScript stays on 6.0.3 because the embedded language service requires its JavaScript compiler API; TypeScript 7 is not a drop-in replacement for that API.
+
+The 2026-11-04 dependency audit reports [GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249) in `vscode-languageclient`'s `minimatch` dependency. Its patched 11.x release removes `Minimatch.makeRe()`, which the client still uses. Do not override that major version without a compatible client update; rerun `bun audit` when reviewing dependency updates.
 
 ## 🗂 Project Structure
 

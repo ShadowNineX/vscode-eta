@@ -14,7 +14,7 @@ coverage/
 scripts/
 tsconfig.json
 tsdown.config.mts
-vitest.config.ts
+vitest.config.mts
 src/
 tests/
 templates/

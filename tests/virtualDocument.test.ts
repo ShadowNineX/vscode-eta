@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import * as ts from "typescript";
+import { Eta } from "eta";
 import {
   DEFAULT_IT_TYPE,
   PREAMBLE_LINE_COUNT,
@@ -38,6 +39,7 @@ function createVirtualLanguageService(
       moduleResolution: ts.ModuleResolutionKind.Bundler,
       noEmit: true,
       skipLibCheck: true,
+      strict: true,
     }),
     getDefaultLibFileName: ts.getDefaultLibFilePath,
     fileExists: (fileName) => files.has(fileName) || ts.sys.fileExists(fileName),
@@ -144,6 +146,13 @@ describe("buildVirtualLine", () => {
     const vl = buildVirtualLine(line);
     expect(vl.substring(3, 16)).toBe("/* comment */");
     expect(vl).toHaveLength(line.length);
+  });
+
+  it("preserves an unfinished template literal ending with delimiter text", () => {
+    const source = '<%= `unterminated %>';
+    const virtualLine = buildVirtualLine(source);
+    expect(virtualLine).toContain('`unterminated %>');
+    expect(virtualLine).toHaveLength(source.length);
   });
 
 
@@ -294,6 +303,48 @@ describe("buildVirtualContent", () => {
     expect(vc).not.toContain("not TypeScript");
     expect(vc).toContain("it.name");
   });
+
+  it.each(["<%@ it.name %><%= it.age %>", "<%@it.name%><%@it.age%>"])(
+    "separates adjacent JavaScript custom tags: %s", (source) => {
+      const virtual = buildVirtualDocument(source, "{ name: string; age: number }", {
+        ...DEFAULT_ETA_LANGUAGE_OPTIONS,
+        customTagTypes: { "@": "javascript" },
+      });
+      const service = createVirtualLanguageService("custom-adjacent.ts", virtual.content);
+      try {
+        expect(service.getSyntacticDiagnostics("custom-adjacent.ts")).toEqual([]);
+        expect(service.getSemanticDiagnostics("custom-adjacent.ts")).toEqual([]);
+        expect(virtual.content.slice(virtual.bodyOffset, virtual.bodyOffset + source.length)).toHaveLength(source.length);
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
+  it.each([
+    "<% // comment %><%= it.name %>",
+    "<% const x = 1; // comment %><%= it.name %>",
+    "<% if (it.name) { // comment %><%= it.name %><% } %>",
+    "<%@ // comment %><%= it.name %>",
+    '<% const url = "https://example"; %><%= it.name %>',
+    "<% const slash = /[//]/; %><%= it.name %>",
+  ])("keeps IntelliSense after a tag containing //: %s", (source) => {
+    expect(new Eta({ customTags: { "@": () => "" } }).renderString(source, { name: "Ada" })).toBe("Ada");
+    const virtual = buildVirtualDocument(source, "{ name: string }", {
+      ...DEFAULT_ETA_LANGUAGE_OPTIONS, customTagTypes: { "@": "javascript" },
+    });
+    const service = createVirtualLanguageService("line-comments.ts", virtual.content);
+    try {
+      const info = service.getQuickInfoAtPosition("line-comments.ts", virtual.bodyOffset + source.lastIndexOf("name") + 1);
+      expect(ts.displayPartsToString(info?.displayParts)).toContain("name: string");
+      expect(service.getSyntacticDiagnostics("line-comments.ts")).toEqual([]);
+      expect(service.getSemanticDiagnostics("line-comments.ts")).toEqual([]);
+      if (source.includes("https://example")) expect(virtual.content).toContain('"https://example"');
+      if (source.includes("/[//]/")) expect(virtual.content).toContain("/[//]/");
+    } finally {
+      service.dispose();
+    }
+  });
 });
 
 // ── PREAMBLE_LINE_COUNT ───────────────────────────────────────────────────────
@@ -375,7 +426,105 @@ describe("buildPreamble", () => {
       functionHeader: "",
     });
 
-    expect(p.split("\n")[0]).toContain("const { name, age } = it;");
+    expect(p).toContain("const { name, age } = __etaWithData as __EtaWith<typeof __etaWithData>;");
+  });
+
+  it("exposes all useWith union fields while preserving missing-property undefined", () => {
+    const source = '<%= typeof name !== "undefined" ? name.toUpperCase() : age?.toFixed() %>';
+    const virtual = buildVirtualDocument(source, "{ name: string } | { age: number }", {
+      ...DEFAULT_ETA_LANGUAGE_OPTIONS, useWith: true,
+    });
+    const service = createVirtualLanguageService("with-union.ts", virtual.content);
+    try {
+      expect(service.getSyntacticDiagnostics("with-union.ts")).toEqual([]);
+      expect(service.getSemanticDiagnostics("with-union.ts")).toEqual([]);
+      const info = service.getQuickInfoAtPosition("with-union.ts", virtual.bodyOffset + source.indexOf("name"));
+      expect(ts.displayPartsToString(info?.displayParts)).toContain("string | undefined");
+      expect(virtual.preambleLineCount).toBe(PREAMBLE_LINE_COUNT);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("reports unsafe access to a useWith field missing from another render shape", () => {
+    const virtual = buildVirtualDocument("<%= name.toUpperCase() %>", "{ name: string } | { age: number }", {
+      ...DEFAULT_ETA_LANGUAGE_OPTIONS, useWith: true,
+    });
+    const service = createVirtualLanguageService("with-missing.ts", virtual.content);
+    try {
+      const diagnostics = service.getSemanticDiagnostics("with-missing.ts");
+      expect(diagnostics).toHaveLength(1);
+      expect(ts.flattenDiagnosticMessageText(diagnostics[0].messageText, "\n")).toContain("possibly 'undefined'");
+      expect(diagnostics[0].start).toBeGreaterThanOrEqual(virtual.bodyOffset);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it("reads readonly, quoted and intersected useWith fields without exposing nested or reserved keys", () => {
+    const virtual = buildVirtualDocument('<%= title.toUpperCase() %><%= count.toFixed() %>',
+      '({ readonly "title": string; nested: { hidden: number }; "default": boolean; "not valid": string } & { count: number })', {
+        ...DEFAULT_ETA_LANGUAGE_OPTIONS, useWith: true,
+      });
+    const service = createVirtualLanguageService("with-properties.ts", virtual.content);
+    try {
+      expect(service.getSyntacticDiagnostics("with-properties.ts")).toEqual([]);
+      expect(service.getSemanticDiagnostics("with-properties.ts")).toEqual([]);
+      expect(virtual.content).toContain("const { title, nested, count }");
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it.each(["it", "options", "include", "includeAsync", "layout", "__etaWithData"])(
+    "models useWith data shadowing the outer %s binding", (name) => {
+      const source = `<%= ${name}.toUpperCase() %>`;
+      expect(new Eta({ useWith: true }).renderString(source, { [name]: "Ada" })).toBe("ADA");
+      const virtual = buildVirtualDocument(source, `{ ${name}: string }`, {
+        ...DEFAULT_ETA_LANGUAGE_OPTIONS, useWith: true,
+      });
+      const service = createVirtualLanguageService("with-shadow.ts", virtual.content);
+      try {
+        expect(service.getSyntacticDiagnostics("with-shadow.ts")).toEqual([]);
+        expect(service.getSemanticDiagnostics("with-shadow.ts")).toEqual([]);
+      } finally {
+        service.dispose();
+      }
+    },
+  );
+
+  it("keeps inner helpers and template locals ahead of useWith data", () => {
+    const source = '<% const name = "local"; print(name); %>';
+    expect(new Eta({ useWith: true, outputFunctionName: "print" }).renderString(source, {
+      name: "data", print: "data",
+    })).toBe("local");
+    const virtual = buildVirtualDocument(source, "{ name: string; print: string }", {
+      ...DEFAULT_ETA_LANGUAGE_OPTIONS, useWith: true, outputFunctionName: "print",
+    });
+    const service = createVirtualLanguageService("with-local.ts", virtual.content);
+    try {
+      expect(service.getSyntacticDiagnostics("with-local.ts")).toEqual([]);
+      expect(service.getSemanticDiagnostics("with-local.ts")).toEqual([]);
+    } finally {
+      service.dispose();
+    }
+  });
+
+  it.each(["const", "var"])("avoids %s functionHeader collisions with the useWith alias", (kind) => {
+    const options = {
+      ...DEFAULT_ETA_LANGUAGE_OPTIONS, useWith: true,
+      functionHeader: `${kind} __etaWithData = 1;`,
+    };
+    const source = '<%= name %><%= __etaWithData.toFixed() %>';
+    expect(new Eta({ useWith: true, functionHeader: options.functionHeader }).renderString(source, { name: "Ada" })).toBe("Ada1");
+    const virtual = buildVirtualDocument(source, "{ name: string }", options);
+    const service = createVirtualLanguageService("with-header.ts", virtual.content);
+    try {
+      expect(service.getSyntacticDiagnostics("with-header.ts")).toEqual([]);
+      expect(service.getSemanticDiagnostics("with-header.ts")).toEqual([]);
+    } finally {
+      service.dispose();
+    }
   });
 
   it("preserves multiline functionHeader JavaScript and reports its line offset", () => {

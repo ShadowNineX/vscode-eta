@@ -12,11 +12,17 @@ interface TagContentState {
   blockComment: boolean;
 }
 
+// Keep this in sync with Eta's template-literal matcher. Eta treats a whole
+// template literal as opaque while it looks for the tag delimiter, including
+// nested interpolation braces up to its supported nesting depth.
+const templateLiteral = /`(?:\\[\s\S]|\${(?:[^{}]|{(?:[^{}]|{[^}]*})*})*}|(?!\${)[^\\`])*`/y;
+
 export type UnclosedTagState = "string" | "block-comment";
 
 export interface TagContentChunk {
   js: string;
   next: number;
+  closed?: boolean;
   unclosedState?: UnclosedTagState;
 }
 
@@ -65,6 +71,24 @@ export function consumeTagOpener(
 }
 
 
+function consumeTagCloser(
+  line: string,
+  index: number,
+  options: EtaLanguageOptions,
+): TagContentChunk | undefined {
+  const close = options.tags[1];
+  if (line.startsWith(close, index)) {
+    return { js: " ".repeat(close.length), next: index + close.length };
+  }
+  if (
+    (line[index] === "-" || line[index] === "_") &&
+    line.startsWith(close, index + 1)
+  ) {
+    return { js: " ".repeat(close.length + 1), next: index + close.length + 1 };
+  }
+  return undefined;
+}
+
 function consumeBlockCommentChar(
   line: string,
   index: number,
@@ -112,27 +136,16 @@ function consumeStateStart(
     return { js: pair, next: index + 2 };
   }
   const ch = line[index];
-  if (ch === '"' || ch === "'" || ch === "`") {
+  if (ch === "`") {
+    templateLiteral.lastIndex = index;
+    const match = templateLiteral.exec(line);
+    if (match) return { js: match[0], next: templateLiteral.lastIndex };
     state.quote = ch;
     return { js: ch, next: index + 1 };
   }
-  return undefined;
-}
-
-function consumeTagCloser(
-  line: string,
-  index: number,
-  options: EtaLanguageOptions,
-): TagContentChunk | undefined {
-  const close = options.tags[1];
-  if (line.startsWith(close, index)) {
-    return { js: " ".repeat(close.length), next: index + close.length };
-  }
-  if (
-    (line[index] === "-" || line[index] === "_") &&
-    line.startsWith(close, index + 1)
-  ) {
-    return { js: " ".repeat(close.length + 1), next: index + close.length + 1 };
+  if (ch === '"' || ch === "'") {
+    state.quote = ch;
+    return { js: ch, next: index + 1 };
   }
   return undefined;
 }
@@ -160,7 +173,7 @@ export function consumeTagContent(
       continue;
     }
     const closer = consumeTagCloser(line, i, options);
-    if (closer) return { js: js + closer.js, next: closer.next };
+    if (closer) return { js: js + closer.js, next: closer.next, closed: true };
     js += line[i];
     i++;
   }
@@ -171,23 +184,6 @@ export function consumeTagContent(
     unclosedState = "block-comment";
   }
   return { js, next: i, unclosedState };
-}
-
-export function isClosedTagContent(
-  source: string,
-  from: number,
-  to: number,
-  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
-): boolean {
-  const close = options.tags[1];
-  return (
-    to > from &&
-    (source.slice(to - close.length, to) === close ||
-      (to > close.length &&
-        (source[to - close.length - 1] === "-" ||
-          source[to - close.length - 1] === "_") &&
-        source.slice(to - close.length, to) === close))
-  );
 }
 
 function consumeEtaTagRange(
@@ -205,7 +201,7 @@ function consumeEtaTagRange(
     content += consumed.js;
     unclosedState = consumed.unclosedState;
     cursor = consumed.next;
-    if (isClosedTagContent(source, opener.next, cursor, options)) {
+    if (consumed.closed) {
       return {
         start,
         contentStart: opener.next,

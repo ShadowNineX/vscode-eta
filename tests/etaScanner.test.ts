@@ -172,6 +172,25 @@ describe("consumeTagContent", () => {
     expect(next).toBe(source.length);
   });
 
+  it("recognizes a later valid literal after an incomplete interpolation", () => {
+    const source = "`${x ` + `valid %>` %>";
+    const result = consumeTagContent(source, 0);
+
+    expect(result.closed).toBe(true);
+    expect(result.next).toBe(source.length);
+    expect(result.js).toBe("`${x ` + `valid %>`   ");
+  });
+
+  it("handles many incomplete interpolations before a closing Eta tag", () => {
+    const content = "`${x` + ".repeat(32_768);
+    const source = `${content}value %>`;
+    const result = consumeTagContent(source, 0);
+
+    expect(result.closed).toBe(true);
+    expect(result.next).toBe(source.length);
+    expect(result.js).toBe(`${content}value   `);
+  });
+
   it("ignores %> inside a block comment", () => {
     const { js, next } = consumeTagContent("/* %> */ value %>", 0);
     expect(js).toBe("/* %> */ value   ");
@@ -241,6 +260,27 @@ describe("findEtaTagRanges", () => {
       closed: false,
       unclosedState: "string",
     });
+  });
+
+  it.each([
+    { name: "unclosed interpolation braces", content: "`${" + "{".repeat(131_072) },
+    { name: "a trailing template escape", content: "`value \\" },
+  ])("handles $name", ({ content }) => {
+    const source = `<%= ${content}`;
+    expect(findEtaTagRanges(source)).toEqual([
+      { start: 0, contentStart: 3, end: source.length, closed: false, empty: false, unclosedState: "string" },
+    ]);
+  });
+
+  it("finds every tag in a document with many independent template literals", () => {
+    const tag = "<%= `value` %>";
+    const source = tag.repeat(4_096);
+    const ranges = findEtaTagRanges(source);
+
+    expect(ranges).toHaveLength(4_096);
+    expect(ranges.every((range, index) =>
+      range.closed && range.start === index * tag.length && range.end === (index + 1) * tag.length,
+    )).toBe(true);
   });
 
   it("marks empty tags", () => {

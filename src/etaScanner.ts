@@ -12,19 +12,45 @@ interface TagContentState {
   blockComment: boolean;
 }
 
-// Keep this in sync with Eta's template-literal matcher. Eta treats a whole
-// template literal as opaque while it looks for the tag delimiter, including
-// nested interpolation braces up to its supported nesting depth.
-const templateInterpolationBraces = /{(?:[^{}]|{[^}]*})*}/;
-const templateInterpolation = new RegExp(
-  String.raw`\${(?:[^{}]|${templateInterpolationBraces.source})*}`,
-);
-const templateLiteralParts = [
-  /\\[\s\S]/.source,
-  templateInterpolation.source,
-  /(?!\${)[^\\`]/.source,
-].join("|");
-const templateLiteral = new RegExp(`\`(?:${templateLiteralParts})*\``, "y");
+function templateContentEnd(
+  source: string,
+  index: number,
+  ends: Uint32Array,
+  interpolationEnd: number,
+): number {
+  const ch = source[index];
+  if (ch === "`") return index + 1;
+  if (ch === "\\") return ends[index + 2];
+  if (ch === "$" && source[index + 1] === "{") return interpolationEnd;
+  return ends[index + 1];
+}
+
+// Match Eta's bounded template-literal grammar, including its treatment of
+// quotes/comments as ordinary interpolation content and of extra opening braces
+// inside the innermost brace group. Zero means no closing backtick is reachable.
+// Working backwards lets each state reuse the result for its remaining suffix,
+// so repeated incomplete literals cannot repeatedly scan the rest of the file.
+function buildTemplateLiteralEnds(source: string): Uint32Array {
+  const ends = new Uint32Array(source.length + 2);
+  let interpolationEnd = 0;
+  let nestedBraceEnd = 0;
+  let innerBraceEnd = 0;
+  let interpolationAfterNext = 0;
+
+  for (let i = source.length - 1; i >= 0; i--) {
+    ends[i] = templateContentEnd(source, i, ends, interpolationAfterNext);
+    interpolationAfterNext = interpolationEnd;
+    if (source[i] === "}") {
+      innerBraceEnd = nestedBraceEnd;
+      nestedBraceEnd = interpolationEnd;
+      interpolationEnd = ends[i + 1];
+    } else if (source[i] === "{") {
+      interpolationEnd = nestedBraceEnd;
+      nestedBraceEnd = innerBraceEnd;
+    }
+  }
+  return ends;
+}
 
 export type UnclosedTagState = "string" | "block-comment";
 
@@ -33,6 +59,21 @@ export interface TagContentChunk {
   next: number;
   closed?: boolean;
   unclosedState?: UnclosedTagState;
+}
+
+export type TagContentScanner = (start: number) => TagContentChunk;
+
+/** Share lazy template-literal indexing across all tags in one source. */
+export function createTagContentScanner(
+  source: string,
+  options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
+): TagContentScanner {
+  let templateEnds: Uint32Array | undefined;
+  const templateEnd = (index: number): number => {
+    templateEnds ??= buildTemplateLiteralEnds(source);
+    return templateEnds[index + 1];
+  };
+  return (start) => consumeTagContentWithMatcher(source, start, options, templateEnd);
 }
 
 export interface EtaTagRange {
@@ -138,6 +179,7 @@ function consumeStateStart(
   line: string,
   index: number,
   state: TagContentState,
+  templateEnd: (index: number) => number,
 ): TagContentChunk | undefined {
   const pair = line.slice(index, index + 2);
   if (pair === "/*") {
@@ -146,9 +188,8 @@ function consumeStateStart(
   }
   const ch = line[index];
   if (ch === "`") {
-    templateLiteral.lastIndex = index;
-    const match = templateLiteral.exec(line);
-    if (match) return { js: match[0], next: templateLiteral.lastIndex };
+    const end = templateEnd(index);
+    if (end > 0) return { js: line.slice(index, end), next: end };
     state.quote = ch;
     return { js: ch, next: index + 1 };
   }
@@ -165,6 +206,15 @@ export function consumeTagContent(
   start: number,
   options: EtaLanguageOptions = DEFAULT_ETA_LANGUAGE_OPTIONS,
 ): TagContentChunk {
+  return createTagContentScanner(line, options)(start);
+}
+
+function consumeTagContentWithMatcher(
+  line: string,
+  start: number,
+  options: EtaLanguageOptions,
+  templateEnd: (index: number) => number,
+): TagContentChunk {
   const state: TagContentState = {
     quote: undefined,
     blockComment: false,
@@ -175,7 +225,7 @@ export function consumeTagContent(
   while (i < line.length) {
     const chunk =
       consumeActiveTagState(line, i, state) ??
-      consumeStateStart(line, i, state);
+      consumeStateStart(line, i, state, templateEnd);
     if (chunk) {
       js += chunk.js;
       i = chunk.next;
@@ -199,6 +249,7 @@ function consumeEtaTagRange(
   source: string,
   start: number,
   options: EtaLanguageOptions,
+  consumeContent: TagContentScanner,
 ): EtaTagRange {
   const opener = consumeTagOpener(source, start, options);
   let cursor = opener.next;
@@ -206,7 +257,7 @@ function consumeEtaTagRange(
   let unclosedState: UnclosedTagState | undefined;
 
   while (cursor < source.length) {
-    const consumed = consumeTagContent(source, cursor, options);
+    const consumed = consumeContent(cursor);
     content += consumed.js;
     unclosedState = consumed.unclosedState;
     cursor = consumed.next;
@@ -238,6 +289,7 @@ export function findEtaTagRanges(
   const ranges: EtaTagRange[] = [];
   let i = 0;
   const [open] = options.tags;
+  const consumeContent = createTagContentScanner(source, options);
 
   while (i < source.length) {
     if (!source.startsWith(open, i)) {
@@ -245,7 +297,7 @@ export function findEtaTagRanges(
       continue;
     }
 
-    const range = consumeEtaTagRange(source, i, options);
+    const range = consumeEtaTagRange(source, i, options, consumeContent);
     ranges.push(range);
     i = Math.max(range.end, range.start + open.length);
   }

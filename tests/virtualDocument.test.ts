@@ -165,6 +165,12 @@ describe("buildVirtualLine", () => {
     expect(vl).toHaveLength(line.length);
   });
 
+  it("preserves offsets across many template literals containing delimiters", () => {
+    const source = "<%= `value %>` %>".repeat(4_096);
+
+    expect(buildVirtualLine(source)).toBe("    `value %>`  ;".repeat(4_096));
+  });
+
   it("separates multiple output tags on one line", () => {
     const line = '<img src="<%= it.featuredImage %>" alt="<%= it.title %>">';
     const vl = buildVirtualLine(line);

@@ -1,8 +1,9 @@
 import ts from "typescript";
 import {
-  consumeTagContent,
+  createTagContentScanner,
   consumeTagOpener,
   TagContentChunk,
+  TagContentScanner,
 } from "./etaScanner";
 import {
   DEFAULT_ETA_LANGUAGE_OPTIONS,
@@ -217,13 +218,14 @@ function consumeVirtualTag(
   source: string,
   start: number,
   options: EtaLanguageOptions,
+  consumeContent: TagContentScanner,
 ): TagContentChunk {
   const opener = consumeTagOpener(source, start, options);
   let js = " ".repeat(opener.padLen);
   let cursor = opener.next;
 
   while (cursor < source.length) {
-    const content = consumeTagContent(source, cursor, options);
+    const content = consumeContent(cursor);
     js += opener.contentIsJs ? content.js : maskNonNewlineContent(content.js);
     if (content.closed) {
       return {
@@ -244,9 +246,10 @@ export function buildVirtualContentBody(
   let out = "";
   let i = 0;
   const [open] = options.tags;
+  const consumeContent = createTagContentScanner(source, options);
   while (i < source.length) {
     if (source.startsWith(open, i)) {
-      const tag = consumeVirtualTag(source, i, options);
+      const tag = consumeVirtualTag(source, i, options, consumeContent);
       out += tag.js;
       i = tag.next;
     } else {

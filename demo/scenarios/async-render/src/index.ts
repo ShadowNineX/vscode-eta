@@ -25,7 +25,7 @@ const report: AsyncReport = {
     { label: "Jobs completed", value: 128, trend: "up" },
     { label: "Retries", value: 4, trend: "down" },
   ],
-  fetchSummary: async () => "All async jobs completed successfully.",
+  fetchSummary: () => Promise.resolve("All async jobs completed successfully."),
 };
 
 console.log(await eta.renderAsync("async-report", report));

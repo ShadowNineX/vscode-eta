@@ -35,7 +35,7 @@ jobs:
           node-version: "22"
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
 
       - name: Run bundled LSP smoke test
         run: bun run test -- tests/lsp.e2e.test.ts
@@ -53,7 +53,7 @@ jobs:
 
       - name: Upload coverage reports to Codecov
         if: runner.os == 'Linux'
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./coverage/lcov.info
@@ -61,7 +61,7 @@ jobs:
 
       - name: Package VSIX
         if: runner.os == 'Linux'
-        run: npx --yes @vscode/vsce package --no-dependencies --out vscode-eta-${{ github.sha }}.vsix
+        run: npx --yes --ignore-scripts @vscode/vsce package --no-dependencies --out vscode-eta-${{ github.sha }}.vsix
 
       - name: Upload VSIX artifact
         if: runner.os == 'Linux'

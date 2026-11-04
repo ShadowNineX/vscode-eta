@@ -15,7 +15,16 @@ interface TagContentState {
 // Keep this in sync with Eta's template-literal matcher. Eta treats a whole
 // template literal as opaque while it looks for the tag delimiter, including
 // nested interpolation braces up to its supported nesting depth.
-const templateLiteral = /`(?:\\[\s\S]|\${(?:[^{}]|{(?:[^{}]|{[^}]*})*})*}|(?!\${)[^\\`])*`/y;
+const templateInterpolationBraces = /{(?:[^{}]|{[^}]*})*}/;
+const templateInterpolation = new RegExp(
+  String.raw`\${(?:[^{}]|${templateInterpolationBraces.source})*}`,
+);
+const templateLiteralParts = [
+  /\\[\s\S]/.source,
+  templateInterpolation.source,
+  /(?!\${)[^\\`]/.source,
+].join("|");
+const templateLiteral = new RegExp(`\`(?:${templateLiteralParts})*\``, "y");
 
 export type UnclosedTagState = "string" | "block-comment";
 

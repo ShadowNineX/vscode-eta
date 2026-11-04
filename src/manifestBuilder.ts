@@ -303,7 +303,7 @@ function structuralType(root: string, reference: EtaManifestTypeReference, input
   const exported = moduleSymbol
     ? checker.getExportsOfModule(moduleSymbol).find((item) => item.name === reference.export)
     : undefined;
-  const symbol = exported && (exported.flags & ts.SymbolFlags.Alias)
+  const symbol = exported && (exported.flags & ts.SymbolFlags.Alias) !== 0
     ? checker.getAliasedSymbol(exported)
     : exported;
   const declaration = symbol?.valueDeclaration ?? symbol?.declarations?.[0];

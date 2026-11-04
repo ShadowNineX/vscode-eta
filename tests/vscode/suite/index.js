@@ -100,7 +100,7 @@ async function verifyProductionProviders() {
       `Eta watcher refresh to ${type}`,
       () => vscode.commands.executeCommand("vscode.executeHoverProvider", document.uri, propertyPosition),
       (value) => Array.isArray(value) && value.some((hover) =>
-        hover.contents.some((content) => new RegExp(`name:\\s*${type}`).test(String(content.value ?? content)))),
+        hover.contents.some((content) => new RegExp(String.raw`name:\s*${type}`).test(String(content.value ?? content)))),
     );
   }
   try {

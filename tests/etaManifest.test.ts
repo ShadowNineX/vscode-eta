@@ -410,7 +410,7 @@ describe("Eta language-support manifest", () => {
     definitions[0].dataPath = ["node", "node"];
     writeManifest(workspace.root, manifest);
     const result = loadEtaLanguageSupportManifest(workspace.root);
-    if (result.status !== "loaded") throw new Error(result.messages.join("\n"));
+    expect(result.status).toBe("loaded");
   });
 
   it("accepts an empty physical template with no source mappings", () => {

@@ -52,33 +52,26 @@ describe("Eta 4.6 runtime parity", () => {
     expect(runtimeSyntaxDiagnostics(commentTemplate)).toEqual([]);
   });
 
-  it("keeps delimiters inside nested JavaScript template literals", () => {
+  it.each([
+    {
+      name: "keeps delimiters inside nested JavaScript template literals",
+      template: "<%= `outer ${`inner %> value`}` %>",
+      expected: "outer inner %&gt; value",
+    },
+    {
+      name: "keeps CRLF and nested braces in JavaScript template literals",
+      template: "first\r\n<%= `outer ${({ text: `inner %> value` /* } */ }).text}` %>",
+      expected: "first\nouter inner %&gt; value",
+    },
+    {
+      name: "matches Eta when a template interpolation contains a regex with backticks",
+      template: "<%= `x ${/`%>/.test(\"`%>\")}` %>",
+      expected: "x true",
+    },
+  ])("$name", ({ template, expected }) => {
     const eta = new Eta();
-    const template = "<%= `outer ${`inner %> value`}` %>";
 
-    expect(eta.renderString(template, {})).toBe("outer inner %&gt; value");
-    expect(findEtaTagRanges(template)).toMatchObject([
-      { closed: true, end: template.length },
-    ]);
-    expect(runtimeSyntaxDiagnostics(template)).toEqual([]);
-  });
-
-  it("keeps CRLF and nested braces in JavaScript template literals", () => {
-    const eta = new Eta();
-    const template = "first\r\n<%= `outer ${({ text: `inner %> value` /* } */ }).text}` %>";
-
-    expect(eta.renderString(template, {})).toBe("first\nouter inner %&gt; value");
-    expect(findEtaTagRanges(template)).toMatchObject([
-      { closed: true, end: template.length },
-    ]);
-    expect(runtimeSyntaxDiagnostics(template)).toEqual([]);
-  });
-
-  it("matches Eta when a template interpolation contains a regex with backticks", () => {
-    const eta = new Eta();
-    const template = "<%= `x ${/`%>/.test(\"`%>\")}` %>";
-
-    expect(eta.renderString(template, {})).toBe("x true");
+    expect(eta.renderString(template, {})).toBe(expected);
     expect(findEtaTagRanges(template)).toMatchObject([
       { closed: true, end: template.length },
     ]);

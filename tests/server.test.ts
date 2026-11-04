@@ -569,7 +569,7 @@ describe("server entrypoint", () => {
           options && typeof options === "object" && "bigint" in options && options.bigint,
         ).map(([fileName]) => String(fileName));
         expect(observed.length).toBeGreaterThanOrEqual(3);
-        expect(observed.length).toBe(new Set(observed).size);
+        expect(observed).toHaveLength(new Set(observed).size);
       }
     } finally {
       manifestStatSpy.mockClear();

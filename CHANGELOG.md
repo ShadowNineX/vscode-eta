@@ -9,7 +9,7 @@
 - Released the workspace file watcher when the extension shuts down and expanded native editor tests for source refresh and diagnostic recovery.
 - Updated compatible dependencies, including Vitest and its patched transitive packages; retained the supported TypeScript compiler API and VS Code baseline.
 - Hardened CI dependency installation and pinned the coverage uploader to a verified commit; addressed SonarQube findings in parsing, manifest alias checks and tests.
-- Losslessly compressed the extension icon to meet the Marketplace upload size limit without changing its artwork.
+- Resized and compressed the extension icon to meet Marketplace size and dimension limits while preserving its design.
 
 ## 0.4.0
 
